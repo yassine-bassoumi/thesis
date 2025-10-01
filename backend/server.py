@@ -39,8 +39,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__ident="2b")
+# Password hashing - using SHA256 for simplicity
+import hashlib
+import secrets
 security = HTTPBearer()
 
 # Models
