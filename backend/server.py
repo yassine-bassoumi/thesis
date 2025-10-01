@@ -40,7 +40,7 @@ app.add_middleware(
 )
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__ident="2b")
 security = HTTPBearer()
 
 # Models
