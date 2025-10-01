@@ -134,13 +134,22 @@ class Notification(NotificationBase):
 
 # Utility functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    # Split salt and hash
+    try:
+        salt, stored_hash = hashed_password.split(':')
+        # Hash the plain password with the stored salt
+        password_hash = hashlib.sha256((plain_password + salt).encode()).hexdigest()
+        return password_hash == stored_hash
+    except:
+        return False
 
 def get_password_hash(password: str) -> str:
-    # Truncate password to 72 bytes for bcrypt compatibility
-    if len(password.encode('utf-8')) > 72:
-        password = password[:70]  # Keep it safe under 72 bytes
-    return pwd_context.hash(password)
+    # Generate a random salt
+    salt = secrets.token_hex(16)
+    # Create hash with salt
+    password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+    # Return salt:hash format
+    return f"{salt}:{password_hash}"
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
