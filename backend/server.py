@@ -34,8 +34,8 @@ app = FastAPI(title="Collaborator Task Platform")
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -134,21 +134,16 @@ class Notification(NotificationBase):
 
 # Utility functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # Split salt and hash
     try:
         salt, stored_hash = hashed_password.split(':')
-        # Hash the plain password with the stored salt
         password_hash = hashlib.sha256((plain_password + salt).encode()).hexdigest()
         return password_hash == stored_hash
     except:
         return False
 
 def get_password_hash(password: str) -> str:
-    # Generate a random salt
     salt = secrets.token_hex(16)
-    # Create hash with salt
     password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-    # Return salt:hash format
     return f"{salt}:{password_hash}"
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -178,6 +173,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     user = await db.users.find_one({"id": user_id})
     if user is None:
         raise credentials_exception
+    
+    # Nettoyer l'ObjectId
+    if "_id" in user:
+        del user["_id"]
     return User(**user)
 
 def require_role(allowed_roles: List[str]):
@@ -191,6 +190,12 @@ def require_role(allowed_roles: List[str]):
     return decorator
 
 # Helper functions
+def clean_mongo_id(item: dict) -> dict:
+    """Nettoie les ObjectId de MongoDB"""
+    if "_id" in item:
+        del item["_id"]  # Supprime l'ObjectId automatique de MongoDB
+    return item
+
 def prepare_for_mongo(data: dict) -> dict:
     """Prepare data for MongoDB storage"""
     if isinstance(data.get('created_at'), datetime):
@@ -203,6 +208,9 @@ def prepare_for_mongo(data: dict) -> dict:
 
 def parse_from_mongo(item: dict) -> dict:
     """Parse data from MongoDB"""
+    # Nettoyer l'ObjectId d'abord
+    item = clean_mongo_id(item)
+    
     if isinstance(item.get('created_at'), str):
         item['created_at'] = datetime.fromisoformat(item['created_at'])
     if isinstance(item.get('due_date'), str):
@@ -216,12 +224,10 @@ def parse_from_mongo(item: dict) -> dict:
 # Authentication Routes
 @app.post("/api/auth/register", response_model=Token)
 async def register(user_data: UserCreate):
-    # Check if user exists
     existing_user = await db.users.find_one({"email": user_data.email})
     if existing_user:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Create new user
     hashed_password = get_password_hash(user_data.password)
     user = User(**user_data.dict())
     user_dict = user.dict()
@@ -230,7 +236,6 @@ async def register(user_data: UserCreate):
     user_dict = prepare_for_mongo(user_dict)
     await db.users.insert_one(user_dict)
     
-    # Create access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.id}, expires_delta=access_token_expires
@@ -252,6 +257,7 @@ async def login(user_credentials: UserLogin):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    user_data = clean_mongo_id(user_data)
     user_data = parse_from_mongo(user_data)
     user = User(**{k: v for k, v in user_data.items() if k != "password"})
     
@@ -271,15 +277,21 @@ async def login(user_credentials: UserLogin):
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     return current_user
 
-@app.get("/api/users", response_model=List[User])
+@app.get("/api/users")
 async def get_users(current_user: User = Depends(require_role(["manager"]))):
     users = await db.users.find().to_list(length=None)
-    return [User(**{k: v for k, v in parse_from_mongo(user).items() if k != "password"}) for user in users]
+    cleaned_users = []
+    for user in users:
+        user = clean_mongo_id(user)
+        user = parse_from_mongo(user)
+        # Remove password from response
+        user_dict = {k: v for k, v in user.items() if k != "password"}
+        cleaned_users.append(user_dict)
+    return cleaned_users
 
-# Task Routes
+# Task Routes - VERSIONS CORRIGÉES AVEC GESTION OBJECTID
 @app.post("/api/tasks", response_model=Task)
 async def create_task(task_data: TaskCreate, current_user: User = Depends(require_role(["manager"]))):
-    # Verify assignee exists
     assignee = await db.users.find_one({"id": task_data.assignee_id})
     if not assignee:
         raise HTTPException(status_code=404, detail="Assignee not found")
@@ -288,7 +300,6 @@ async def create_task(task_data: TaskCreate, current_user: User = Depends(requir
     task_dict = prepare_for_mongo(task.dict())
     await db.tasks.insert_one(task_dict)
     
-    # Create notification for assignee
     notification = Notification(
         user_id=task_data.assignee_id,
         title="New Task Assigned",
@@ -300,55 +311,113 @@ async def create_task(task_data: TaskCreate, current_user: User = Depends(requir
     
     return task
 
-@app.get("/api/tasks", response_model=List[Task])
+@app.get("/api/tasks")
 async def get_tasks(current_user: User = Depends(get_current_user)):
-    if current_user.role == "manager":
-        tasks = await db.tasks.find({"creator_id": current_user.id}).to_list(length=None)
-    else:
-        tasks = await db.tasks.find({"assignee_id": current_user.id}).to_list(length=None)
-    
-    return [Task(**parse_from_mongo(task)) for task in tasks]
-
-@app.get("/api/tasks/{task_id}", response_model=Task)
-async def get_task(task_id: str, current_user: User = Depends(get_current_user)):
-    task = await db.tasks.find_one({"id": task_id})
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task = parse_from_mongo(task)
-    # Check permissions
-    if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    elif current_user.role == "manager" and task["creator_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    return Task(**task)
-
-@app.put("/api/tasks/{task_id}", response_model=Task)
-async def update_task(task_id: str, task_update: TaskUpdate, current_user: User = Depends(get_current_user)):
-    task = await db.tasks.find_one({"id": task_id})
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task = parse_from_mongo(task)
-    
-    # Check permissions
-    if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    elif current_user.role == "manager" and task["creator_id"] != current_user.id:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Update fields
-    update_data = {k: v for k, v in task_update.dict().items() if v is not None}
-    if update_data:
-        update_data = prepare_for_mongo(update_data)
-        await db.tasks.update_one({"id": task_id}, {"$set": update_data})
+    try:
+        if current_user.role == "manager":
+            tasks = await db.tasks.find({"creator_id": current_user.id}).to_list(length=None)
+        else:
+            tasks = await db.tasks.find({"assignee_id": current_user.id}).to_list(length=None)
         
-        # Get updated task
-        updated_task = await db.tasks.find_one({"id": task_id})
-        return Task(**parse_from_mongo(updated_task))
-    
-    return Task(**task)
+        # Traitement sécurisé des tâches avec gestion ObjectId
+        processed_tasks = []
+        for task in tasks:
+            try:
+                # Nettoyer l'ObjectId AVANT tout traitement
+                task = clean_mongo_id(task)
+                task = parse_from_mongo(task)
+                
+                # Ajouter assignee_name seulement pour les managers
+                if current_user.role == "manager" and task.get("assignee_id"):
+                    assignee = await db.users.find_one({"id": task["assignee_id"]})
+                    if assignee:
+                        assignee = clean_mongo_id(assignee)
+                        task["assignee_name"] = assignee.get("full_name", "Nom manquant")
+                
+                processed_tasks.append(task)
+            except Exception as e:
+                print(f"Error processing task {task.get('id', 'unknown')}: {e}")
+                continue
+        
+        return processed_tasks
+        
+    except Exception as e:
+        print(f"Error in get_tasks: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching tasks: {str(e)}")
+
+@app.get("/api/tasks/{task_id}")
+async def get_task(task_id: str, current_user: User = Depends(get_current_user)):
+    try:
+        task = await db.tasks.find_one({"id": task_id})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        # Nettoyer l'ObjectId AVANT tout traitement
+        task = clean_mongo_id(task)
+        task = parse_from_mongo(task)
+        
+        # Check permissions
+        if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        elif current_user.role == "manager" and task["creator_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Ajouter le nom du collaborateur pour les managers
+        if current_user.role == "manager" and task.get("assignee_id"):
+            assignee = await db.users.find_one({"id": task["assignee_id"]})
+            if assignee:
+                assignee = clean_mongo_id(assignee)
+                task["assignee_name"] = assignee.get("full_name", "Collaborateur inconnu")
+        
+        return task
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in get_task: {e}")
+        raise HTTPException(status_code=500, detail="Error fetching task details")
+
+@app.put("/api/tasks/{task_id}")
+async def update_task(task_id: str, task_update: TaskUpdate, current_user: User = Depends(get_current_user)):
+    try:
+        task = await db.tasks.find_one({"id": task_id})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        task = clean_mongo_id(task)
+        task = parse_from_mongo(task)
+        
+        # Check permissions
+        if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        elif current_user.role == "manager" and task["creator_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Update fields
+        update_data = {k: v for k, v in task_update.dict().items() if v is not None}
+        if update_data:
+            update_data = prepare_for_mongo(update_data)
+            await db.tasks.update_one({"id": task_id}, {"$set": update_data})
+            
+            # Get updated task with assignee name
+            updated_task = await db.tasks.find_one({"id": task_id})
+            updated_task = clean_mongo_id(updated_task)
+            updated_task = parse_from_mongo(updated_task)
+            
+            # Add assignee name for managers
+            if current_user.role == "manager" and updated_task.get("assignee_id"):
+                assignee = await db.users.find_one({"id": updated_task["assignee_id"]})
+                if assignee:
+                    assignee = clean_mongo_id(assignee)
+                    updated_task["assignee_name"] = assignee.get("full_name", "Collaborateur inconnu")
+            
+            return updated_task
+        
+        return task
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in update_task: {e}")
+        raise HTTPException(status_code=500, detail="Error updating task")
 
 # Performance Routes
 @app.post("/api/performance", response_model=Performance)
@@ -356,7 +425,6 @@ async def create_performance_evaluation(
     performance_data: PerformanceCreate,
     current_user: User = Depends(require_role(["manager"]))
 ):
-    # Verify task and collaborator exist
     task = await db.tasks.find_one({"id": performance_data.task_id})
     collaborator = await db.users.find_one({"id": performance_data.collaborator_id})
     
@@ -371,12 +439,11 @@ async def create_performance_evaluation(
     
     return performance
 
-@app.get("/api/performance/{collaborator_id}", response_model=List[Performance])
+@app.get("/api/performance/{collaborator_id}")
 async def get_performance_evaluations(
     collaborator_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    # Check permissions
     if current_user.role == "collaborator" and current_user.id != collaborator_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -384,16 +451,28 @@ async def get_performance_evaluations(
         {"collaborator_id": collaborator_id}
     ).to_list(length=None)
     
-    return [Performance(**parse_from_mongo(evaluation)) for evaluation in evaluations]
+    cleaned_evaluations = []
+    for evaluation in evaluations:
+        evaluation = clean_mongo_id(evaluation)
+        evaluation = parse_from_mongo(evaluation)
+        cleaned_evaluations.append(evaluation)
+    
+    return cleaned_evaluations
 
 # Notification Routes
-@app.get("/api/notifications", response_model=List[Notification])
+@app.get("/api/notifications")
 async def get_notifications(current_user: User = Depends(get_current_user)):
     notifications = await db.notifications.find(
         {"user_id": current_user.id}
     ).sort("created_at", -1).to_list(length=None)
     
-    return [Notification(**parse_from_mongo(notification)) for notification in notifications]
+    cleaned_notifications = []
+    for notification in notifications:
+        notification = clean_mongo_id(notification)
+        notification = parse_from_mongo(notification)
+        cleaned_notifications.append(notification)
+    
+    return cleaned_notifications
 
 @app.put("/api/notifications/{notification_id}/read")
 async def mark_notification_read(
@@ -446,7 +525,6 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
             "status": TaskStatus.PENDING
         })
         
-        # Get average performance scores
         evaluations = await db.performance_evaluations.find(
             {"collaborator_id": current_user.id}
         ).to_list(length=None)
