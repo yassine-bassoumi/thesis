@@ -305,7 +305,7 @@ const TaskDetails = () => {
                       {user?.role === 'manager' ? 'Assigned To' : 'Created By'}
                     </p>
                     <p className="text-slate-900">
-                      {user?.role === 'manager' ? 'Collaborator' : 'Manager'}
+                      {user?.role === 'manager' ? (task.assignee_name || 'Collaborator') : 'Manager'}
                     </p>
                   </div>
                 </div>
