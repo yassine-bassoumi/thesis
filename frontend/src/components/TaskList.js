@@ -10,7 +10,9 @@ import {
   Eye, 
   CheckCircle,
   User,
-  ArrowRight
+  ArrowRight,
+  FileText,
+  Download
 } from 'lucide-react';
 import { API } from '../App';
 import axios from 'axios';
@@ -64,6 +66,10 @@ const TaskList = ({ tasks, onTaskUpdate, userRole }) => {
     return new Date(dueDate) < new Date() && status !== 'completed';
   };
 
+  const downloadEvidence = (filename, taskId) => {
+    window.open(`${API}/files/evidence/${filename}`, '_blank');
+  };
+
   if (tasks.length === 0) {
     return (
       <div className="text-center py-12 text-slate-500">
@@ -101,11 +107,27 @@ const TaskList = ({ tasks, onTaskUpdate, userRole }) => {
                   <Badge className={`px-2 py-1 text-xs font-medium rounded-full ${getPriorityBadgeClass(task.priority)}`}>
                     {task.priority.toUpperCase()}
                   </Badge>
+                  
+                  {/* Evidence Files Badge for Managers */}
+                  {userRole === 'manager' && task.completion_evidence && task.completion_evidence.length > 0 && (
+                    <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                      <FileText className="h-3 w-3 mr-1" />
+                      {task.completion_evidence.length} evidence file(s)
+                    </Badge>
+                  )}
                 </div>
                 
                 <p className="text-slate-600 mb-4 line-clamp-2">
                   {task.description}
                 </p>
+                
+                {/* Completion Notes */}
+                {task.completion_notes && (
+                  <div className="mb-4 p-3 bg-green-50 rounded-lg border border-green-200">
+                    <p className="text-sm text-green-800 font-medium mb-1">Completion Notes:</p>
+                    <p className="text-sm text-green-700">{task.completion_notes}</p>
+                  </div>
+                )}
                 
                 <div className="flex items-center space-x-6 text-sm text-slate-500">
                   <div className="flex items-center space-x-1">
@@ -124,10 +146,36 @@ const TaskList = ({ tasks, onTaskUpdate, userRole }) => {
                   {userRole === 'manager' && (
                     <div className="flex items-center space-x-1">
                       <User className="h-4 w-4" />
-                      <span>Assigned to collaborator</span>
+                      <span>{task.assignee_name || 'Collaborator'}</span>
                     </div>
                   )}
                 </div>
+                
+                {/* Evidence Files List for Managers */}
+                {userRole === 'manager' && task.completion_evidence && task.completion_evidence.length > 0 && (
+                  <div className="mt-3">
+                    <p className="text-sm font-medium text-slate-700 mb-2">Evidence Files:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {task.completion_evidence.map((evidence, index) => (
+                        <div key={index} className="flex items-center space-x-1 px-2 py-1 bg-blue-50 rounded border border-blue-200">
+                          <FileText className="h-3 w-3 text-blue-600" />
+                          <span className="text-xs text-blue-700">Evidence {index + 1}</span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-4 w-4 p-0 hover:bg-blue-100"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              downloadEvidence(evidence, task.id);
+                            }}
+                          >
+                            <Download className="h-2 w-2" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
               
               <div className="flex items-center space-x-2 ml-4">
@@ -170,6 +218,13 @@ const TaskList = ({ tasks, onTaskUpdate, userRole }) => {
                      task.status === 'in_progress' ? 'In progress' :
                      isOverdue(task.due_date, task.status) ? 'Overdue' : 'Pending'}
                   </span>
+                  
+                  {/* Completion Date */}
+                  {task.status === 'completed' && task.completed_at && (
+                    <span className="text-green-600 ml-2">
+                      • Completed on {formatDate(task.completed_at)}
+                    </span>
+                  )}
                 </div>
                 
                 <Button
