@@ -4,6 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth, API } from '../App';
+import AnalyticsDashboard from './AnalyticsDashboard';
+import RealTimeMetrics from './RealTimeMetrics';
+import TaskTemplates from './TaskTemplates';
 import { 
   Users, 
   Plus, 
@@ -16,7 +19,8 @@ import {
   Settings,
   TrendingUp,
   Calendar,
-  Filter
+  Filter,
+  FileText
 } from 'lucide-react';
 import axios from 'axios';
 import CreateTaskModal from './CreateTaskModal';
@@ -124,14 +128,16 @@ const ManagerDashboard = () => {
                 )}
               </Button>
               
-              <Button
-                onClick={() => setShowCreateTask(true)}
-                className="btn-primary"
-                data-testid="create-task-button"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Create Task
-              </Button>
+              <div className="flex space-x-2">
+                <Button
+                  onClick={() => setShowCreateTask(true)}
+                  className="btn-primary"
+                  data-testid="create-task-button"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Create Task
+                </Button>
+              </div>
               
               <Button
                 onClick={logout}
@@ -149,6 +155,9 @@ const ManagerDashboard = () => {
 
       {/* Main Content */}
       <main className="container-custom py-8">
+        {/* Real-Time Metrics */}
+        <RealTimeMetrics tasks={tasks} users={users} stats={stats} />
+
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 animate-slideUp">
           <Card className="stats-card" data-testid="total-tasks-card">
@@ -239,6 +248,10 @@ const ManagerDashboard = () => {
               <Calendar className="h-4 w-4 mr-2" />
               Tasks
             </TabsTrigger>
+            <TabsTrigger value="templates" className="data-[state=active]:bg-blue-50">
+              <FileText className="h-4 w-4 mr-2" />
+              Templates
+            </TabsTrigger>
             <TabsTrigger value="team" className="data-[state=active]:bg-blue-50">
               <Users className="h-4 w-4 mr-2" />
               Team
@@ -256,16 +269,37 @@ const ManagerDashboard = () => {
                   <CardTitle className="text-xl font-semibold text-slate-900">Recent Tasks</CardTitle>
                   <CardDescription>Manage and track task progress</CardDescription>
                 </div>
-                <Button variant="ghost" size="sm">
-                  <Filter className="h-4 w-4 mr-2" />
-                  Filter
-                </Button>
+                <div className="flex space-x-2">
+                  <Button variant="ghost" size="sm">
+                    <Filter className="h-4 w-4 mr-2" />
+                    Filter
+                  </Button>
+                  <Button 
+                    onClick={() => setShowCreateTask(true)}
+                    size="sm"
+                    className="btn-primary"
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Task
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 <TaskList 
                   tasks={tasks} 
                   onTaskUpdate={fetchDashboardData}
                   userRole="manager"
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="templates">
+            <Card className="glass-effect border-slate-200/50">
+              <CardContent className="p-6">
+                <TaskTemplates 
+                  collaborators={users.filter(u => u.role === 'collaborator')}
+                  onTaskCreated={fetchDashboardData}
                 />
               </CardContent>
             </Card>
@@ -297,26 +331,25 @@ const ManagerDashboard = () => {
                       </Badge>
                     </div>
                   ))}
+                  
+                  {users.filter(u => u.role === 'collaborator').length === 0 && (
+                    <div className="text-center py-8 text-slate-500">
+                      <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                      <p>No team members yet</p>
+                      <p className="text-sm">Collaborators will appear here once they register</p>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
           </TabsContent>
 
           <TabsContent value="analytics">
-            <div className="grid gap-6">
-              <Card className="glass-effect border-slate-200/50">
-                <CardHeader>
-                  <CardTitle className="text-xl font-semibold text-slate-900">Performance Overview</CardTitle>
-                  <CardDescription>Track team productivity and task completion trends</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-center py-12 text-slate-500">
-                    <BarChart3 className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                    <p>Analytics dashboard coming soon...</p>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+            <AnalyticsDashboard 
+              stats={stats}
+              tasks={tasks}
+              users={users}
+            />
           </TabsContent>
         </Tabs>
       </main>

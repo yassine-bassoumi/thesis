@@ -98,7 +98,8 @@ class Task(TaskBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     attachments: List[str] = []
-    evidence_files: List[str] = []
+    completion_evidence: List[str] = []  # Nouveau champ pour les preuves de completion
+    completion_notes: Optional[str] = None  # Nouveau champ pour les notes de completion
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
@@ -131,6 +132,23 @@ class Notification(NotificationBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     is_read: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+# Task Templates Models
+class TaskTemplateBase(BaseModel):
+    name: str
+    description: str
+    default_priority: str = TaskPriority.MEDIUM
+    estimated_duration_hours: int = 1
+    category: str = "general"
+
+class TaskTemplateCreate(TaskTemplateBase):
+    pass
+
+class TaskTemplate(TaskTemplateBase):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    creator_id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    usage_count: int = 0
 
 # Utility functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -289,7 +307,7 @@ async def get_users(current_user: User = Depends(require_role(["manager"]))):
         cleaned_users.append(user_dict)
     return cleaned_users
 
-# Task Routes - VERSIONS CORRIGÉES AVEC GESTION OBJECTID
+# Task Routes
 @app.post("/api/tasks", response_model=Task)
 async def create_task(task_data: TaskCreate, current_user: User = Depends(require_role(["manager"]))):
     assignee = await db.users.find_one({"id": task_data.assignee_id})
@@ -418,6 +436,172 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
     except Exception as e:
         print(f"Error in update_task: {e}")
         raise HTTPException(status_code=500, detail="Error updating task")
+
+# Task Completion with Files - FICHIERS OPTIONNELS
+@app.post("/api/tasks/{task_id}/complete")
+async def complete_task(
+    task_id: str,
+    completion_notes: Optional[str] = None,
+    files: Optional[List[UploadFile]] = File(None),  # Fichiers optionnels
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        task = await db.tasks.find_one({"id": task_id})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Sauvegarder les fichiers seulement s'ils sont fournis
+        evidence_files = []
+        if files:
+            for file in files:
+                file_extension = os.path.splitext(file.filename)[1]
+                unique_filename = f"{uuid.uuid4()}{file_extension}"
+                file_path = ROOT_DIR / "uploads" / "evidence" / unique_filename
+                
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(file_path, "wb") as buffer:
+                    content = await file.read()
+                    buffer.write(content)
+                
+                evidence_files.append(unique_filename)
+        
+        # Mettre à jour la tâche
+        update_data = {
+            "status": TaskStatus.COMPLETED,
+            "completed_at": datetime.now(timezone.utc),
+            "completion_evidence": evidence_files,
+            "completion_notes": completion_notes
+        }
+        
+        await db.tasks.update_one(
+            {"id": task_id},
+            {"$set": prepare_for_mongo(update_data)}
+        )
+        
+        # Notification pour le manager
+        notification = Notification(
+            user_id=task["creator_id"],
+            title="Task Completed",
+            message=f"Task '{task['title']}' has been completed by {current_user.full_name}",
+            type="task_completed"
+        )
+        notification_dict = prepare_for_mongo(notification.dict())
+        await db.notifications.insert_one(notification_dict)
+        
+        return {"message": "Task completed successfully", "evidence_files": evidence_files}
+        
+    except Exception as e:
+        print(f"Error completing task: {e}")
+        raise HTTPException(status_code=500, detail="Error completing task")
+
+# File download route
+@app.get("/api/files/evidence/{filename}")
+async def download_evidence_file(filename: str, current_user: User = Depends(get_current_user)):
+    file_path = ROOT_DIR / "uploads" / "evidence" / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Vérifier que l'utilisateur a accès à ce fichier
+    task_with_file = await db.tasks.find_one({"completion_evidence": filename})
+    if not task_with_file:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    if (current_user.role == "collaborator" and task_with_file["assignee_id"] != current_user.id) or \
+       (current_user.role == "manager" and task_with_file["creator_id"] != current_user.id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    from fastapi.responses import FileResponse
+    return FileResponse(file_path)
+
+# Task Templates Routes
+@app.post("/api/task-templates", response_model=TaskTemplate)
+async def create_task_template(
+    template_data: TaskTemplateCreate,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    template = TaskTemplate(**template_data.dict(), creator_id=current_user.id)
+    template_dict = prepare_for_mongo(template.dict())
+    await db.task_templates.insert_one(template_dict)
+    return template
+
+@app.get("/api/task-templates")
+async def get_task_templates(current_user: User = Depends(require_role(["manager"]))):
+    templates = await db.task_templates.find(
+        {"creator_id": current_user.id}
+    ).to_list(length=None)
+    
+    cleaned_templates = []
+    for template in templates:
+        template = clean_mongo_id(template)
+        template = parse_from_mongo(template)
+        cleaned_templates.append(template)
+    
+    return cleaned_templates
+
+@app.post("/api/task-templates/{template_id}/instantiate")
+async def instantiate_template(
+    template_id: str,
+    assignee_id: str,
+    due_date: datetime,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    template = await db.task_templates.find_one({"id": template_id})
+    if not template or template["creator_id"] != current_user.id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    assignee = await db.users.find_one({"id": assignee_id})
+    if not assignee:
+        raise HTTPException(status_code=404, detail="Assignee not found")
+    
+    # Créer la tâche à partir du template
+    task_data = TaskCreate(
+        title=f"{template['name']}",
+        description=template['description'],
+        assignee_id=assignee_id,
+        due_date=due_date,
+        priority=template['default_priority']
+    )
+    
+    task = Task(**task_data.dict(), creator_id=current_user.id)
+    task_dict = prepare_for_mongo(task.dict())
+    await db.tasks.insert_one(task_dict)
+    
+    # Incrémenter le compteur d'utilisation
+    await db.task_templates.update_one(
+        {"id": template_id},
+        {"$inc": {"usage_count": 1}}
+    )
+    
+    # Notification
+    notification = Notification(
+        user_id=assignee_id,
+        title="New Task from Template",
+        message=f"You have been assigned: {template['name']}",
+        type="task_assignment"
+    )
+    notification_dict = prepare_for_mongo(notification.dict())
+    await db.notifications.insert_one(notification_dict)
+    
+    return task
+
+@app.delete("/api/task-templates/{template_id}")
+async def delete_template(
+    template_id: str,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    result = await db.task_templates.delete_one({
+        "id": template_id,
+        "creator_id": current_user.id
+    })
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    return {"message": "Template deleted successfully"}
 
 # Performance Routes
 @app.post("/api/performance", response_model=Performance)
