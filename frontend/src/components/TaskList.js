@@ -181,7 +181,11 @@ const TaskList = ({ tasks, onTaskUpdate, userRole }) => {
               <div className="flex items-center space-x-2 ml-4">
                 {userRole === 'collaborator' && task.status !== 'completed' && (
                   <Button
-                    onClick={() => handleStatusUpdate(task.id, 'completed')}
+                    onClick={() => {
+                      if (window.confirm("Are you sure you want to mark this task as complete?")) {
+                        handleStatusUpdate(task.id, 'completed');
+                      }
+                    }}
                     size="sm"
                     className="bg-green-500 hover:bg-green-600 text-white"
                     data-testid={`complete-task-${task.id}`}

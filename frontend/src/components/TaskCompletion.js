@@ -1,4 +1,3 @@
-// components/TaskCompletion.js
 import React, { useState } from 'react';
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -26,43 +25,91 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
   };
 
   const completeTask = async () => {
-    // SUPPRIMER la vérification des fichiers obligatoires
+    if (!window.confirm("Are you sure you want to mark this task as complete?")) {
+      return;
+    }
+    
     setUploading(true);
     try {
       const formData = new FormData();
-      formData.append('completion_notes', completionNotes);
       
-      // Ajouter les fichiers seulement s'il y en a
+      // Ajouter les données de completion
+      const completionPayload = {
+        completion_notes: completionNotes || ''
+      };
+      formData.append('completion_data', JSON.stringify(completionPayload));
+      
+      // Ajouter les fichiers
       files.forEach(file => {
         formData.append('files', file);
       });
 
-      await axios.post(
-        `${API}/tasks/${task.id}/complete`,
-        formData,
-        {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        }
-      );
+      console.log('📤 Envoi completion...');
 
+      // Récupérer le token
+      const token = localStorage.getItem('token');
+      
+      if (!token) {
+        toast.error('Please login again');
+        return;
+      }
+
+      // Utiliser fetch pour plus de fiabilité avec FormData
+      const response = await fetch(`${API}/tasks/${task.id}/complete`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+          // Pas de Content-Type pour FormData, le navigateur le gère automatiquement
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      console.log('✅ Succès! Réponse:', data);
+      
       toast.success('Task completed successfully!');
       setShowCompletionForm(false);
       setCompletionNotes('');
       setFiles([]);
-      onTaskCompleted();
+      
+      if (onTaskCompleted) {
+        onTaskCompleted();
+      }
+      
     } catch (error) {
-      console.error('Error completing task:', error);
-      toast.error('Failed to complete task');
+      console.error('❌ Erreur:', error);
+      
+      if (error.message.includes('401') || error.message.includes('Not authenticated')) {
+        toast.error('Session expired. Please login again.');
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.reload();
+      } else {
+        toast.error(error.message || 'Failed to complete task');
+      }
     } finally {
       setUploading(false);
     }
   };
 
-  const downloadEvidence = (filename) => {
-    window.open(`${API}/files/evidence/${filename}`, '_blank');
-  };
+ const downloadEvidence = (filename) => {
+  const token = localStorage.getItem('token');
+  
+  if (!token) {
+    toast.error('Please login again');
+    return;
+  }
+
+  // 🔥 CORRECTION : Ajouter le token dans l'URL
+  const url = `${API}/files/evidence/${filename}?token=${encodeURIComponent(token)}`;
+  console.log('🔗 Download URL with token:', url);
+  window.open(url, '_blank');
+};
 
   return (
     <div>
@@ -93,7 +140,7 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
                   <div key={index} className="flex items-center justify-between p-2 bg-white rounded border">
                     <div className="flex items-center space-x-2">
                       <FileText className="h-4 w-4 text-green-600" />
-                      <span className="text-sm">Evidence {index + 1}</span>
+                      <span className="text-sm">{file}</span>
                     </div>
                     <Button
                       variant="ghost"
@@ -113,7 +160,7 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
           <DialogTrigger asChild>
             <Button className="bg-green-500 hover:bg-green-600 text-white">
               <CheckCircle className="h-4 w-4 mr-2" />
-              Mark as Complete
+              Complete Task
             </Button>
           </DialogTrigger>
           <DialogContent className="max-w-md">
@@ -136,7 +183,7 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
               </div>
               
               <div className="space-y-2">
-                <Label>Evidence Files (Optional)</Label> {/* Changé en optionnel */}
+                <Label>Evidence Files (Optional)</Label>
                 <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center">
                   <input
                     type="file"
@@ -144,11 +191,12 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
                     onChange={handleFileChange}
                     className="hidden"
                     id="evidence-files"
+                    accept=".jpg,.jpeg,.png,.pdf"
                   />
                   <label htmlFor="evidence-files" className="cursor-pointer">
                     <Upload className="h-8 w-8 mx-auto mb-2 text-gray-400" />
                     <p className="text-sm text-gray-600">Click to upload evidence files</p>
-                    <p className="text-xs text-gray-500">Supported files: images, documents, etc.</p>
+                    <p className="text-xs text-gray-500">JPG, PNG, PDF (Max 10MB)</p>
                   </label>
                 </div>
                 
@@ -179,7 +227,7 @@ const TaskCompletion = ({ task, onTaskCompleted }) => {
                 </Button>
                 <Button 
                   onClick={completeTask} 
-                  disabled={uploading} // Supprimé la condition files.length === 0
+                  disabled={uploading}
                   className="bg-green-500 hover:bg-green-600"
                 >
                   {uploading ? 'Uploading...' : 'Complete Task'}
