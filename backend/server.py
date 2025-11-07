@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Form
+import aiofiles 
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -98,8 +100,8 @@ class Task(TaskBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     attachments: List[str] = []
-    completion_evidence: List[str] = []  # Nouveau champ pour les preuves de completion
-    completion_notes: Optional[str] = None  # Nouveau champ pour les notes de completion
+    completion_evidence: List[str] = []
+    completion_notes: Optional[str] = None
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
@@ -192,7 +194,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if user is None:
         raise credentials_exception
     
-    # Nettoyer l'ObjectId
     if "_id" in user:
         del user["_id"]
     return User(**user)
@@ -209,13 +210,11 @@ def require_role(allowed_roles: List[str]):
 
 # Helper functions
 def clean_mongo_id(item: dict) -> dict:
-    """Nettoie les ObjectId de MongoDB"""
     if "_id" in item:
-        del item["_id"]  # Supprime l'ObjectId automatique de MongoDB
+        del item["_id"]
     return item
 
 def prepare_for_mongo(data: dict) -> dict:
-    """Prepare data for MongoDB storage"""
     if isinstance(data.get('created_at'), datetime):
         data['created_at'] = data['created_at'].isoformat()
     if isinstance(data.get('due_date'), datetime):
@@ -225,8 +224,6 @@ def prepare_for_mongo(data: dict) -> dict:
     return data
 
 def parse_from_mongo(item: dict) -> dict:
-    """Parse data from MongoDB"""
-    # Nettoyer l'ObjectId d'abord
     item = clean_mongo_id(item)
     
     if isinstance(item.get('created_at'), str):
@@ -302,7 +299,6 @@ async def get_users(current_user: User = Depends(require_role(["manager"]))):
     for user in users:
         user = clean_mongo_id(user)
         user = parse_from_mongo(user)
-        # Remove password from response
         user_dict = {k: v for k, v in user.items() if k != "password"}
         cleaned_users.append(user_dict)
     return cleaned_users
@@ -337,15 +333,12 @@ async def get_tasks(current_user: User = Depends(get_current_user)):
         else:
             tasks = await db.tasks.find({"assignee_id": current_user.id}).to_list(length=None)
         
-        # Traitement sécurisé des tâches avec gestion ObjectId
         processed_tasks = []
         for task in tasks:
             try:
-                # Nettoyer l'ObjectId AVANT tout traitement
                 task = clean_mongo_id(task)
                 task = parse_from_mongo(task)
                 
-                # Ajouter assignee_name seulement pour les managers
                 if current_user.role == "manager" and task.get("assignee_id"):
                     assignee = await db.users.find_one({"id": task["assignee_id"]})
                     if assignee:
@@ -370,17 +363,14 @@ async def get_task(task_id: str, current_user: User = Depends(get_current_user))
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         
-        # Nettoyer l'ObjectId AVANT tout traitement
         task = clean_mongo_id(task)
         task = parse_from_mongo(task)
         
-        # Check permissions
         if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         elif current_user.role == "manager" and task["creator_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Ajouter le nom du collaborateur pour les managers
         if current_user.role == "manager" and task.get("assignee_id"):
             assignee = await db.users.find_one({"id": task["assignee_id"]})
             if assignee:
@@ -404,24 +394,20 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
         task = clean_mongo_id(task)
         task = parse_from_mongo(task)
         
-        # Check permissions
         if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         elif current_user.role == "manager" and task["creator_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Update fields
         update_data = {k: v for k, v in task_update.dict().items() if v is not None}
         if update_data:
             update_data = prepare_for_mongo(update_data)
             await db.tasks.update_one({"id": task_id}, {"$set": update_data})
             
-            # Get updated task with assignee name
             updated_task = await db.tasks.find_one({"id": task_id})
             updated_task = clean_mongo_id(updated_task)
             updated_task = parse_from_mongo(updated_task)
             
-            # Add assignee name for managers
             if current_user.role == "manager" and updated_task.get("assignee_id"):
                 assignee = await db.users.find_one({"id": updated_task["assignee_id"]})
                 if assignee:
@@ -437,15 +423,28 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
         print(f"Error in update_task: {e}")
         raise HTTPException(status_code=500, detail="Error updating task")
 
-# Task Completion with Files - FICHIERS OPTIONNELS
+# 🔥 VERSION CORRECTE - Route pour compléter une tâche
 @app.post("/api/tasks/{task_id}/complete")
 async def complete_task(
     task_id: str,
-    completion_notes: Optional[str] = None,
-    files: Optional[List[UploadFile]] = File(None),  # Fichiers optionnels
+    request: Request,
     current_user: User = Depends(get_current_user)
 ):
     try:
+        print(f"🎯 Complete task - User: {current_user.id}")
+        
+        form_data = await request.form()
+        completion_data = form_data.get("completion_data", "")
+        
+        files = []
+        form_items = await request.form()
+        for key, value in form_items.items():
+            if hasattr(value, 'filename') and value.filename:
+                files.append(value)
+        
+        print(f"📦 completion_data: {completion_data}")
+        print(f"📁 fichiers: {len(files)}")
+        
         task = await db.tasks.find_one({"id": task_id})
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -453,69 +452,144 @@ async def complete_task(
         if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Sauvegarder les fichiers seulement s'ils sont fournis
-        evidence_files = []
-        if files:
-            for file in files:
-                file_extension = os.path.splitext(file.filename)[1]
-                unique_filename = f"{uuid.uuid4()}{file_extension}"
-                file_path = ROOT_DIR / "uploads" / "evidence" / unique_filename
-                
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                
-                with open(file_path, "wb") as buffer:
-                    content = await file.read()
-                    buffer.write(content)
-                
-                evidence_files.append(unique_filename)
+        completion_notes = ""
+        if completion_data:
+            try:
+                data_dict = json.loads(completion_data)
+                completion_notes = data_dict.get('completion_notes', '')
+            except json.JSONDecodeError:
+                completion_notes = completion_data
         
-        # Mettre à jour la tâche
+        evidence_files = []
+        for file in files:
+            if file and hasattr(file, 'filename') and file.filename:
+                ext = os.path.splitext(file.filename)[1].lower()
+                if ext in ['.jpg', '.jpeg', '.png', '.pdf']:
+                    filename = f"{uuid.uuid4()}{ext}"
+                    file_path = ROOT_DIR / "uploads" / "evidence" / filename
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    content = await file.read()
+                    async with aiofiles.open(file_path, 'wb') as f:
+                        await f.write(content)
+                    
+                    evidence_files.append(filename)
+                    print(f"✅ Fichier sauvegardé: {filename}")
+        
         update_data = {
-            "status": TaskStatus.COMPLETED,
-            "completed_at": datetime.now(timezone.utc),
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
             "completion_evidence": evidence_files,
             "completion_notes": completion_notes
         }
         
-        await db.tasks.update_one(
+        result = await db.tasks.update_one(
             {"id": task_id},
-            {"$set": prepare_for_mongo(update_data)}
+            {"$set": update_data}
         )
         
-        # Notification pour le manager
-        notification = Notification(
-            user_id=task["creator_id"],
-            title="Task Completed",
-            message=f"Task '{task['title']}' has been completed by {current_user.full_name}",
-            type="task_completed"
-        )
-        notification_dict = prepare_for_mongo(notification.dict())
-        await db.notifications.insert_one(notification_dict)
+        print(f"📊 Tâche mise à jour: {result.modified_count} modification(s)")
         
-        return {"message": "Task completed successfully", "evidence_files": evidence_files}
+        if task["creator_id"] != current_user.id:
+            notification = Notification(
+                user_id=task["creator_id"],
+                title="Task Completed",
+                message=f"Task '{task['title']}' has been completed by {current_user.full_name}",
+                type="task_completed"
+            )
+            notification_dict = prepare_for_mongo(notification.dict())
+            await db.notifications.insert_one(notification_dict)
+        
+        return {
+            "status": "success", 
+            "message": "Task completed successfully",
+            "evidence_files": evidence_files,
+            "completion_notes": completion_notes
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 🔥 VERSION ULTRA SIMPLE - Ça va MARCHER
+@app.get("/api/files/evidence/{filename}")
+async def download_evidence_file_simple(filename: str):
+    """Version simple sans auth ni permissions"""
+    try:
+        print(f"🎯 Téléchargement fichier: {filename}")
+        
+        file_path = ROOT_DIR / "uploads" / "evidence" / filename
+        
+        if not file_path.exists():
+            print(f"❌ Fichier non trouvé: {filename}")
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        print(f"✅ Envoi du fichier: {filename}")
+        
+        from fastapi.responses import FileResponse
+        return FileResponse(file_path)
         
     except Exception as e:
-        print(f"Error completing task: {e}")
-        raise HTTPException(status_code=500, detail="Error completing task")
+        print(f"❌ Erreur: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error downloading file")
 
-# File download route
-@app.get("/api/files/evidence/{filename}")
-async def download_evidence_file(filename: str, current_user: User = Depends(get_current_user)):
-    file_path = ROOT_DIR / "uploads" / "evidence" / filename
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    # Vérifier que l'utilisateur a accès à ce fichier
-    task_with_file = await db.tasks.find_one({"completion_evidence": filename})
-    if not task_with_file:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    if (current_user.role == "collaborator" and task_with_file["assignee_id"] != current_user.id) or \
-       (current_user.role == "manager" and task_with_file["creator_id"] != current_user.id):
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    from fastapi.responses import FileResponse
-    return FileResponse(file_path)
+# Routes de debug
+@app.get("/api/debug/file-status")
+async def debug_file_status():
+    """Vérifier l'état des fichiers"""
+    try:
+        evidence_dir = ROOT_DIR / "uploads" / "evidence"
+        physical_files = []
+        if evidence_dir.exists():
+            physical_files = [f.name for f in evidence_dir.iterdir() if f.is_file()]
+        
+        print(f"📂 Fichiers dans evidence/: {physical_files}")
+        
+        return {
+            "physical_files": physical_files,
+            "message": f"Found {len(physical_files)} files"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/api/debug/associate-file")
+async def debug_associate_file(
+    task_id: str,
+    filename: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Associer un fichier à une tâche"""
+    try:
+        print(f"🔗 Association {filename} → Tâche {task_id}")
+        
+        task = await db.tasks.find_one({"id": task_id})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        file_path = ROOT_DIR / "uploads" / "evidence" / filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        result = await db.tasks.update_one(
+            {"id": task_id},
+            {"$set": {
+                "completion_evidence": [filename],
+                "status": "completed",
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+        
+        if result.modified_count > 0:
+            return {"status": "success", "message": f"File {filename} associated with task {task_id}"}
+        else:
+            return {"status": "error", "message": "No changes made"}
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Task Templates Routes
 @app.post("/api/task-templates", response_model=TaskTemplate)
@@ -557,7 +631,6 @@ async def instantiate_template(
     if not assignee:
         raise HTTPException(status_code=404, detail="Assignee not found")
     
-    # Créer la tâche à partir du template
     task_data = TaskCreate(
         title=f"{template['name']}",
         description=template['description'],
@@ -570,13 +643,11 @@ async def instantiate_template(
     task_dict = prepare_for_mongo(task.dict())
     await db.tasks.insert_one(task_dict)
     
-    # Incrémenter le compteur d'utilisation
     await db.task_templates.update_one(
         {"id": template_id},
         {"$inc": {"usage_count": 1}}
     )
     
-    # Notification
     notification = Notification(
         user_id=assignee_id,
         title="New Task from Template",
@@ -681,15 +752,15 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         total_tasks = await db.tasks.count_documents({"creator_id": current_user.id})
         completed_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.COMPLETED
+            "status": "completed"
         })
         pending_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.PENDING
+            "status": "pending"
         })
         overdue_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.OVERDUE
+            "status": "overdue"
         })
         
         return {
@@ -702,11 +773,11 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         my_tasks = await db.tasks.count_documents({"assignee_id": current_user.id})
         completed = await db.tasks.count_documents({
             "assignee_id": current_user.id,
-            "status": TaskStatus.COMPLETED
+            "status": "completed"
         })
         pending = await db.tasks.count_documents({
             "assignee_id": current_user.id,
-            "status": TaskStatus.PENDING
+            "status": "pending"
         })
         
         evaluations = await db.performance_evaluations.find(

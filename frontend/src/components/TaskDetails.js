@@ -37,19 +37,46 @@ const TaskDetails = () => {
     fetchTaskDetails();
   }, [taskId]);
 
-  const fetchTaskDetails = async () => {
-    try {
-      const response = await axios.get(`${API}/tasks/${taskId}`);
-      setTask(response.data);
-    } catch (error) {
-      console.error('Error fetching task details:', error);
-      toast.error('Failed to load task details');
-      navigate('/dashboard');
-    } finally {
-      setLoading(false);
+ const fetchTaskDetails = async () => {
+  try {
+    console.log('=== FETCHING TASK DETAILS ===');
+    console.log('Task ID:', taskId);
+    console.log('API URL:', `${API}/tasks/${taskId}`);
+    
+    const response = await axios.get(`${API}/tasks/${taskId}`);
+    
+    console.log('=== TASK DATA RECEIVED ===');
+    console.log('Full response:', response);
+    console.log('Task data:', response.data);
+    console.log('Completion evidence:', response.data.completion_evidence);
+    console.log('Evidence files:', response.data.evidence_files);
+    console.log('Attachments:', response.data.attachments);
+    
+    // Log all keys to see what's available
+    console.log('All keys in task data:', Object.keys(response.data));
+    
+    // Check if evidence exists in any form
+    if (response.data.completion_evidence) {
+      console.log('Completion evidence type:', typeof response.data.completion_evidence);
+      console.log('Completion evidence length:', response.data.completion_evidence.length);
     }
-  };
-
+    if (response.data.evidence_files) {
+      console.log('Evidence files type:', typeof response.data.evidence_files);
+      console.log('Evidence files length:', response.data.evidence_files.length);
+    }
+    
+    console.log('=== END DEBUG ===');
+    
+    setTask(response.data);
+  } catch (error) {
+    console.error('Error fetching task details:', error);
+    console.error('Error response:', error.response);
+    toast.error('Failed to load task details');
+    navigate('/dashboard');
+  } finally {
+    setLoading(false);
+  }
+};
   const handleStatusUpdate = async (newStatus) => {
     setUpdating(true);
     try {
@@ -164,8 +191,6 @@ const TaskDetails = () => {
                   Evaluate Performance
                 </Button>
               )}
-              
-             
             </div>
           </div>
         </div>
@@ -383,9 +408,9 @@ const TaskDetails = () => {
             {user?.role === 'collaborator' && task.status !== 'completed' && (
               <Card className="glass-effect border-slate-200/50 animate-slideUp" style={{animationDelay: '0.6s'}}>
                 <CardHeader>
-                  <CardTitle className="text-lg font-semibold text-slate-900">Complete Task</CardTitle>
+                  <CardTitle className="text-lg font-semibold text-slate-900">Complete and Upload File</CardTitle>
                   <CardDescription>
-                    Mark this task as complete and provide evidence
+                    Mark this task as complete and upload evidence files
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
