@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -7,6 +7,9 @@ import { useAuth, API } from '../App';
 import AnalyticsDashboard from './AnalyticsDashboard';
 import RealTimeMetrics from './RealTimeMetrics';
 import TaskTemplates from './TaskTemplates';
+import FilterTasks from './FilterTasks';
+import KanbanView from './KanbanView';
+import OverviewTab from './OverviewTab';
 import { 
   Users, 
   Plus, 
@@ -20,7 +23,8 @@ import {
   TrendingUp,
   Calendar,
   Filter,
-  FileText
+  FileText,
+  Home
 } from 'lucide-react';
 import axios from 'axios';
 import CreateTaskModal from './CreateTaskModal';
@@ -31,11 +35,14 @@ const ManagerDashboard = () => {
   const { user, logout } = useAuth();
   const [stats, setStats] = useState({});
   const [tasks, setTasks] = useState([]);
+  const [filteredTasks, setFilteredTasks] = useState([]);
   const [users, setUsers] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showCreateTask, setShowCreateTask] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [viewMode, setViewMode] = useState('list'); // 'list' or 'kanban'
 
   useEffect(() => {
     fetchDashboardData();
@@ -53,6 +60,7 @@ const ManagerDashboard = () => {
 
       setStats(statsRes.data);
       setTasks(tasksRes.data);
+      setFilteredTasks(tasksRes.data); // Initialize filtered tasks
       setUsers(usersRes.data);
       setNotifications(notificationsRes.data);
     } catch (error) {
@@ -65,6 +73,16 @@ const ManagerDashboard = () => {
   const handleTaskCreated = () => {
     setShowCreateTask(false);
     fetchDashboardData();
+  };
+
+  // Handle filter changes
+  const handleFilterChange = (filteredTasks) => {
+    setFilteredTasks(filteredTasks);
+  };
+
+  // Reset filters
+  const handleClearFilters = () => {
+    setFilteredTasks(tasks);
   };
 
   const getStatusBadgeClass = (status) => {
@@ -155,95 +173,19 @@ const ManagerDashboard = () => {
 
       {/* Main Content */}
       <main className="container-custom py-8">
-        {/* Real-Time Metrics */}
+        {/* Real-Time Metrics - Keep this as it's lightweight */}
         <RealTimeMetrics tasks={tasks} users={users} stats={stats} />
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8 animate-slideUp">
-          <Card className="stats-card" data-testid="total-tasks-card">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-slate-600 text-sm font-medium">Total Tasks</p>
-                  <p className="text-3xl font-bold text-slate-900 mt-1">
-                    {stats.total_tasks || 0}
-                  </p>
-                </div>
-                <div className="p-3 bg-blue-100 rounded-full">
-                  <BarChart3 className="h-6 w-6 text-blue-600" />
-                </div>
-              </div>
-              <div className="mt-4 flex items-center text-sm">
-                <TrendingUp className="h-4 w-4 text-green-500 mr-1" />
-                <span className="text-green-600">+12% from last month</span>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="stats-card" data-testid="completed-tasks-card">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-slate-600 text-sm font-medium">Completed</p>
-                  <p className="text-3xl font-bold text-slate-900 mt-1">
-                    {stats.completed_tasks || 0}
-                  </p>
-                </div>
-                <div className="p-3 bg-green-100 rounded-full">
-                  <CheckCircle className="h-6 w-6 text-green-600" />
-                </div>
-              </div>
-              <div className="mt-4 text-sm text-slate-600">
-                {stats.total_tasks > 0 
-                  ? `${Math.round((stats.completed_tasks / stats.total_tasks) * 100)}% completion rate`
-                  : 'No tasks yet'
-                }
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="stats-card" data-testid="pending-tasks-card">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-slate-600 text-sm font-medium">Pending</p>
-                  <p className="text-3xl font-bold text-slate-900 mt-1">
-                    {stats.pending_tasks || 0}
-                  </p>
-                </div>
-                <div className="p-3 bg-yellow-100 rounded-full">
-                  <Clock className="h-6 w-6 text-yellow-600" />
-                </div>
-              </div>
-              <div className="mt-4 text-sm text-slate-600">
-                Awaiting completion
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="stats-card" data-testid="overdue-tasks-card">
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-slate-600 text-sm font-medium">Overdue</p>
-                  <p className="text-3xl font-bold text-slate-900 mt-1">
-                    {stats.overdue_tasks || 0}
-                  </p>
-                </div>
-                <div className="p-3 bg-red-100 rounded-full">
-                  <AlertTriangle className="h-6 w-6 text-red-600" />
-                </div>
-              </div>
-              <div className="mt-4 text-sm text-slate-600">
-                Requires attention
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Main Content Tabs */}
-        <Tabs defaultValue="tasks" className="animate-slideUp" style={{animationDelay: '0.2s'}}>
+        {/* Main Content Tabs - MODIFIED SECTION */}
+        <Tabs defaultValue="overview" className="animate-slideUp" style={{animationDelay: '0.2s'}}>
           <TabsList className="mb-6 bg-white/80 border border-slate-200/50">
+            {/* NEW OVERVIEW TAB */}
+            <TabsTrigger value="overview" className="data-[state=active]:bg-blue-50">
+              <Home className="h-4 w-4 mr-2" />
+              Overview
+            </TabsTrigger>
+            
+            {/* EXISTING TABS */}
             <TabsTrigger value="tasks" className="data-[state=active]:bg-blue-50">
               <Calendar className="h-4 w-4 mr-2" />
               Tasks
@@ -262,17 +204,59 @@ const ManagerDashboard = () => {
             </TabsTrigger>
           </TabsList>
 
+          {/* NEW OVERVIEW TAB CONTENT */}
+          <TabsContent value="overview">
+            <OverviewTab 
+              stats={stats}
+              tasks={tasks}
+              users={users}
+              onShowCreateTask={() => setShowCreateTask(true)}
+            />
+          </TabsContent>
+
+          {/* EXISTING TASKS TAB - UNCHANGED */}
           <TabsContent value="tasks">
             <Card className="glass-effect border-slate-200/50">
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
-                  <CardTitle className="text-xl font-semibold text-slate-900">Recent Tasks</CardTitle>
+                  <CardTitle className="text-xl font-semibold text-slate-900">
+                    Recent Tasks {filteredTasks.length !== tasks.length && (
+                      <span className="text-sm text-slate-500 ml-2">
+                        (filtered from {tasks.length} total)
+                      </span>
+                    )}
+                  </CardTitle>
                   <CardDescription>Manage and track task progress</CardDescription>
                 </div>
                 <div className="flex space-x-2">
-                  <Button variant="ghost" size="sm">
+                  {/* View Mode Toggle */}
+                  <div className="flex bg-slate-100 rounded-lg p-1">
+                    <Button
+                      variant={viewMode === 'list' ? "default" : "ghost"}
+                      size="sm"
+                      onClick={() => setViewMode('list')}
+                      className={viewMode === 'list' ? "bg-white shadow-sm" : ""}
+                    >
+                      List
+                    </Button>
+                    <Button
+                      variant={viewMode === 'kanban' ? "default" : "ghost"}
+                      size="sm"
+                      onClick={() => setViewMode('kanban')}
+                      className={viewMode === 'kanban' ? "bg-white shadow-sm" : ""}
+                    >
+                      Kanban
+                    </Button>
+                  </div>
+                  
+                  <Button 
+                    variant="ghost" 
+                    size="sm"
+                    onClick={() => setShowFilters(!showFilters)}
+                    className={showFilters ? "bg-blue-50" : ""}
+                  >
                     <Filter className="h-4 w-4 mr-2" />
-                    Filter
+                    {showFilters ? 'Hide Filters' : 'Filter'}
                   </Button>
                   <Button 
                     onClick={() => setShowCreateTask(true)}
@@ -284,16 +268,37 @@ const ManagerDashboard = () => {
                   </Button>
                 </div>
               </CardHeader>
+
+              {/* Filter component */}
+              {showFilters && (
+                <div className="px-6 pb-4 border-b border-slate-200/50">
+                  <FilterTasks
+                    tasks={tasks}
+                    onFilterChange={handleFilterChange}
+                    onClearFilters={handleClearFilters}
+                    collaborators={users.filter(u => u.role === 'collaborator')}
+                  />
+                </div>
+              )}
+
               <CardContent>
-                <TaskList 
-                  tasks={tasks} 
-                  onTaskUpdate={fetchDashboardData}
-                  userRole="manager"
-                />
+                {viewMode === 'list' ? (
+                  <TaskList 
+                    tasks={filteredTasks} 
+                    onTaskUpdate={fetchDashboardData}
+                    userRole="manager"
+                  />
+                ) : (
+                  <KanbanView 
+                    tasks={filteredTasks} 
+                    onTaskUpdate={fetchDashboardData}
+                  />
+                )}
               </CardContent>
             </Card>
           </TabsContent>
 
+          {/* OTHER TABS REMAIN UNCHANGED */}
           <TabsContent value="templates">
             <Card className="glass-effect border-slate-200/50">
               <CardContent className="p-6">
