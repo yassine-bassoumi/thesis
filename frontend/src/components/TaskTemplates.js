@@ -72,23 +72,46 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
       return;
     }
 
+    console.log('🎯 Instantiating template:', {
+      templateId: selectedTemplate.id,
+      assigneeId: instantiateData.assignee_id,
+      dueDate: instantiateData.due_date.toISOString()
+    });
+
     try {
+      // 🔥 CORRECTION : Utilise les query parameters au lieu du body
       const response = await axios.post(
-        `${API}/task-templates/${selectedTemplate.id}/instantiate`,
-        {
-          assignee_id: instantiateData.assignee_id,
-          due_date: instantiateData.due_date.toISOString()
-        }
+        `${API}/task-templates/${selectedTemplate.id}/instantiate?assignee_id=${instantiateData.assignee_id}&due_date=${encodeURIComponent(instantiateData.due_date.toISOString())}`
       );
       
+      console.log('✅ Template instantiated:', response.data);
       toast.success('Task created from template!');
       setShowInstantiateForm(false);
       setSelectedTemplate(null);
       setInstantiateData({ assignee_id: '', due_date: null });
       onTaskCreated();
     } catch (error) {
-      console.error('Error instantiating template:', error);
+      console.error('❌ Error instantiating template:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        url: error.config?.url
+      });
       toast.error('Failed to create task from template');
+    }
+  };
+
+  const deleteTemplate = async (templateId) => {
+    if (!window.confirm('Are you sure you want to delete this template?')) {
+      return;
+    }
+
+    try {
+      await axios.delete(`${API}/task-templates/${templateId}`);
+      toast.success('Template deleted successfully!');
+      fetchTemplates();
+    } catch (error) {
+      console.error('Error deleting template:', error);
+      toast.error('Failed to delete template');
     }
   };
 
@@ -103,6 +126,15 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
       default:
         return <Clock className="h-4 w-4 text-yellow-500" />;
     }
+  };
+
+  const getPriorityBadge = (priority) => {
+    const classes = {
+      high: 'bg-red-100 text-red-800',
+      medium: 'bg-yellow-100 text-yellow-800',
+      low: 'bg-green-100 text-green-800'
+    };
+    return classes[priority] || 'bg-gray-100 text-gray-800';
   };
 
   return (
@@ -177,6 +209,15 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
                   />
                 </div>
               </div>
+
+              <div className="space-y-2">
+                <Label>Category</Label>
+                <Input
+                  value={newTemplate.category}
+                  onChange={(e) => setNewTemplate({...newTemplate, category: e.target.value})}
+                  placeholder="e.g., marketing, development, design"
+                />
+              </div>
               
               <div className="flex justify-end space-x-2 pt-4">
                 <Button type="button" variant="ghost" onClick={() => setShowCreateForm(false)}>
@@ -193,13 +234,21 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {templates.map((template) => (
-          <Card key={template.id} className="hover:shadow-lg transition-shadow">
+          <Card key={template.id} className="hover:shadow-lg transition-shadow border-slate-200/50">
             <CardHeader className="pb-3">
               <div className="flex justify-between items-start">
                 <div className="flex items-center space-x-2">
                   <FileText className="h-5 w-5 text-blue-500" />
                   <CardTitle className="text-lg">{template.name}</CardTitle>
                 </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => deleteTemplate(template.id)}
+                  className="h-8 w-8 p-0 text-slate-400 hover:text-red-500"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
               </div>
               <CardDescription className="line-clamp-2">
                 {template.description}
@@ -210,28 +259,39 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
               <div className="flex items-center justify-between text-sm">
                 <div className="flex items-center space-x-2">
                   {getPriorityIcon(template.default_priority)}
-                  <span className="capitalize">{template.default_priority} priority</span>
+                  <Badge className={`${getPriorityBadge(template.default_priority)} capitalize`}>
+                    {template.default_priority}
+                  </Badge>
                 </div>
-                <Badge variant="secondary">
+                <Badge variant="secondary" className="bg-blue-100 text-blue-700">
                   {template.usage_count || 0} uses
                 </Badge>
               </div>
               
-              <div className="flex items-center text-sm text-slate-600">
-                <Clock className="h-4 w-4 mr-1" />
-                {template.estimated_duration_hours}h estimated
+              <div className="flex items-center justify-between text-sm text-slate-600">
+                <div className="flex items-center">
+                  <Clock className="h-4 w-4 mr-1" />
+                  {template.estimated_duration_hours}h estimated
+                </div>
+                {template.category && (
+                  <Badge variant="outline" className="text-xs">
+                    {template.category}
+                  </Badge>
+                )}
               </div>
               
-              <Button
-                className="w-full"
-                onClick={() => {
-                  setSelectedTemplate(template);
-                  setShowInstantiateForm(true);
-                }}
-              >
-                <Users className="h-4 w-4 mr-2" />
-                Use Template
-              </Button>
+              <div className="flex space-x-2">
+                <Button
+                  className="flex-1"
+                  onClick={() => {
+                    setSelectedTemplate(template);
+                    setShowInstantiateForm(true);
+                  }}
+                >
+                  <Users className="h-4 w-4 mr-2" />
+                  Use Template
+                </Button>
+              </div>
             </CardContent>
           </Card>
         ))}
@@ -239,7 +299,7 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
         {templates.length === 0 && (
           <div className="col-span-full text-center py-12 text-slate-500">
             <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>No templates yet</p>
+            <p className="text-lg font-medium mb-2">No templates yet</p>
             <p className="text-sm">Create your first template to get started</p>
           </div>
         )}
@@ -307,6 +367,17 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
                 </PopoverContent>
               </Popover>
             </div>
+
+            {selectedTemplate && (
+              <div className="p-3 bg-slate-50 rounded-lg border">
+                <h4 className="font-medium text-sm mb-2">Template Details:</h4>
+                <div className="text-sm text-slate-600 space-y-1">
+                  <div>Priority: <span className="capitalize">{selectedTemplate.default_priority}</span></div>
+                  <div>Estimated: {selectedTemplate.estimated_duration_hours} hours</div>
+                  {selectedTemplate.category && <div>Category: {selectedTemplate.category}</div>}
+                </div>
+              </div>
+            )}
             
             <div className="flex justify-end space-x-2 pt-4">
               <Button variant="ghost" onClick={() => setShowInstantiateForm(false)}>
