@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Form
 import aiofiles 
@@ -356,6 +356,69 @@ async def get_tasks(current_user: User = Depends(get_current_user)):
         print(f"Error in get_tasks: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching tasks: {str(e)}")
 
+# 🔥 NOUVELLE ROUTE - Filtrage des tâches pour le manager
+@app.get("/api/tasks/filter")
+async def filter_tasks(
+    priority: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: User = Depends(require_role(["manager"]))
+):
+    """Filtrer les tâches par priorité, statut et date"""
+    try:
+        print(f"🎯 Filtrage tâches - Priority: {priority}, Status: {status}, Date: {date_from} to {date_to}")
+        
+        # Construire le filtre de base
+        filter_query = {"creator_id": current_user.id}
+        
+        # Ajouter les filtres optionnels
+        if priority and priority != "all":
+            filter_query["priority"] = priority
+        
+        if status and status != "all":
+            filter_query["status"] = status
+        
+        # Filtre par date (due_date)
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+            if date_to:
+                date_filter["$lte"] = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+            filter_query["due_date"] = date_filter
+        
+        print(f"🔍 Query MongoDB: {filter_query}")
+        
+        # Exécuter la requête
+        tasks = await db.tasks.find(filter_query).to_list(length=None)
+        
+        # Traiter les résultats
+        processed_tasks = []
+        for task in tasks:
+            try:
+                task = clean_mongo_id(task)
+                task = parse_from_mongo(task)
+                
+                # Ajouter le nom de l'assigné
+                if task.get("assignee_id"):
+                    assignee = await db.users.find_one({"id": task["assignee_id"]})
+                    if assignee:
+                        assignee = clean_mongo_id(assignee)
+                        task["assignee_name"] = assignee.get("full_name", "Nom manquant")
+                
+                processed_tasks.append(task)
+            except Exception as e:
+                print(f"Error processing task {task.get('id', 'unknown')}: {e}")
+                continue
+        
+        print(f"✅ Tâches filtrées trouvées: {len(processed_tasks)}")
+        return processed_tasks
+        
+    except Exception as e:
+        print(f"❌ Error in filter_tasks: {e}")
+        raise HTTPException(status_code=500, detail=f"Error filtering tasks: {str(e)}")
+
 @app.get("/api/tasks/{task_id}")
 async def get_task(task_id: str, current_user: User = Depends(get_current_user)):
     try:
@@ -423,7 +486,7 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
         print(f"Error in update_task: {e}")
         raise HTTPException(status_code=500, detail="Error updating task")
 
-# 🔥 VERSION CORRECTE - Route pour compléter une tâche
+# Routes pour compléter une tâche
 @app.post("/api/tasks/{task_id}/complete")
 async def complete_task(
     task_id: str,
@@ -515,7 +578,6 @@ async def complete_task(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-# 🔥 VERSION ULTRA SIMPLE - Ça va MARCHER
 @app.get("/api/files/evidence/{filename}")
 async def download_evidence_file_simple(filename: str):
     """Version simple sans auth ni permissions"""
@@ -536,60 +598,6 @@ async def download_evidence_file_simple(filename: str):
     except Exception as e:
         print(f"❌ Erreur: {str(e)}")
         raise HTTPException(status_code=500, detail="Error downloading file")
-
-# Routes de debug
-@app.get("/api/debug/file-status")
-async def debug_file_status():
-    """Vérifier l'état des fichiers"""
-    try:
-        evidence_dir = ROOT_DIR / "uploads" / "evidence"
-        physical_files = []
-        if evidence_dir.exists():
-            physical_files = [f.name for f in evidence_dir.iterdir() if f.is_file()]
-        
-        print(f"📂 Fichiers dans evidence/: {physical_files}")
-        
-        return {
-            "physical_files": physical_files,
-            "message": f"Found {len(physical_files)} files"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/api/debug/associate-file")
-async def debug_associate_file(
-    task_id: str,
-    filename: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Associer un fichier à une tâche"""
-    try:
-        print(f"🔗 Association {filename} → Tâche {task_id}")
-        
-        task = await db.tasks.find_one({"id": task_id})
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        file_path = ROOT_DIR / "uploads" / "evidence" / filename
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        result = await db.tasks.update_one(
-            {"id": task_id},
-            {"$set": {
-                "completion_evidence": [filename],
-                "status": "completed",
-                "completed_at": datetime.now(timezone.utc).isoformat()
-            }}
-        )
-        
-        if result.modified_count > 0:
-            return {"status": "success", "message": f"File {filename} associated with task {task_id}"}
-        else:
-            return {"status": "error", "message": "No changes made"}
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # Task Templates Routes
 @app.post("/api/task-templates", response_model=TaskTemplate)
