@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+// src/components/TaskDetails.js
+import React, { useState, useEffect, useCallback } from 'react';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
 import { useAuth, API } from '../App';
 import { 
   ArrowLeft, 
@@ -16,76 +16,317 @@ import {
   FileText,
   MessageCircle,
   Award,
-  Edit,
-  Download
+  Download,
+  Star,
+  Loader,
+  Eye,
 } from 'lucide-react';
 import axios from 'axios';
 import { toast } from "sonner";
 import PerformanceEvaluationModal from './PerformanceEvaluationModal';
 import TaskCompletion from './TaskCompletion';
 
+// ✅ Helpers hors composant
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('token');
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+};
+
+const isPositiveScore = (value) =>
+  typeof value === 'number' && value > 0;
+
+// ✅ Task évaluée ? (ne dépend PAS directement du status)
+const isTaskEvaluated = (task) => {
+  if (!task) return false;
+  
+  const hasAnyNumericScore =
+    isPositiveScore(task.punctuality_score) ||
+    isPositiveScore(task.quality_score) ||
+    isPositiveScore(task.performance_rating);
+
+  const hasFeedback =
+    typeof task.feedback === 'string' && task.feedback.trim() !== '';
+
+  const hasEvaluationDate =
+    task.evaluation_date != null && String(task.evaluation_date).trim() !== '';
+
+  return hasAnyNumericScore || hasFeedback || hasEvaluationDate;
+};
+
+// 🔎 Helpers pour l’evidence (string ou objet)
+const getEvidenceLabel = (evidence, index) => {
+  if (!evidence) return `Evidence ${index + 1}`;
+  if (typeof evidence === 'string') return evidence;
+  if (evidence.original_name) return evidence.original_name;
+  if (evidence.file_name) return evidence.file_name;
+  if (evidence.filename) return evidence.filename;
+  return `Evidence ${index + 1}`;
+};
+
+const getEvidenceFileName = (evidence) => {
+  if (!evidence) return '';
+  if (typeof evidence === 'string') return evidence;
+  return (
+    evidence.file_name ||
+    evidence.filename ||
+    evidence.original_name ||
+    ''
+  );
+};
+
+// ✅ Overdue logique par jour (comme TaskList / Kanban) + support status='overdue'
+const isOverdue = (dueDate, status) => {
+  if (!dueDate) return false;
+
+  // si le backend a déjà mis status='overdue'
+  if (status === 'overdue') return true;
+
+  try {
+    const due = new Date(dueDate);
+    const now = new Date();
+
+    const dueDay = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+    const todayDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    return (
+      dueDay < todayDay &&
+      status !== 'completed' &&
+      status !== 'not_evaluated'
+    );
+  } catch {
+    return false;
+  }
+};
+
+// ✅ Badges de status alignés avec logique evaluated / needsEvaluation / overdue
+const getStatusBadgeClass = (task) => {
+  if (!task) return 'bg-gray-100 text-gray-800 border-gray-200';
+
+  const evaluated = isTaskEvaluated(task);
+  const overdue = isOverdue(task.due_date, task.status);
+  const needsEvaluation =
+    !evaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  if (overdue && task.status !== 'completed' && task.status !== 'not_evaluated') {
+    return 'bg-red-100 text-red-800 border-red-200';
+  }
+
+  if (evaluated) {
+    return 'bg-green-100 text-green-800 border-green-200';
+  }
+
+  if (needsEvaluation) {
+    return 'bg-orange-100 text-orange-800 border-orange-200';
+  }
+
+  const classes = {
+    pending: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    in_progress: 'bg-blue-100 text-blue-800 border-blue-200',
+    overdue: 'bg-red-100 text-red-800 border-red-200'
+  };
+  return classes[task.status] || 'bg-gray-100 text-gray-800 border-gray-200';
+};
+
+const getPriorityBadgeClass = (priority) => {
+  const classes = {
+    low: 'bg-green-100 text-green-800 border-green-200',
+    medium: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+    high: 'bg-red-100 text-red-800 border-red-200'
+  };
+  return classes[priority] || 'bg-gray-100 text-gray-800 border-gray-200';
+};
+
+// ✅ Display status texte aligné avec evaluated / awaiting evaluation
+const getDisplayStatus = (task) => {
+  if (!task) return 'UNKNOWN';
+
+  const evaluated = isTaskEvaluated(task);
+  const needsEvaluation =
+    !evaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  if (evaluated) return 'EVALUATED';
+  if (needsEvaluation) return 'COMPLETED - AWAITING EVALUATION';
+
+  if (task.display_status) {
+    return task.display_status;
+  }
+
+  return task.status ? task.status.replace('_', ' ').toUpperCase() : 'UNKNOWN';
+};
+
+// ✅ Message status harmonisé avec Kanban (overlay overdue)
+const getStatusMessage = (task) => {
+  if (!task) return 'Unknown status';
+  
+  const evaluated = isTaskEvaluated(task);
+  const overdue = isOverdue(task.due_date, task.status);
+  const needsEvaluation =
+    !evaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  let base;
+
+  if (evaluated) {
+    base = 'Task completed and evaluated';
+  } else if (needsEvaluation) {
+    base = 'Task completed - Awaiting evaluation';
+  } else if (task.status === 'in_progress') {
+    base = 'Currently in progress';
+  } else {
+    base = 'Awaiting start';
+  }
+
+  if (overdue) {
+    if (task.status === 'in_progress') {
+      base = `${base} (deadline passed)`;
+    } else if (task.status !== 'completed' && task.status !== 'not_evaluated') {
+      base = `${base} (overdue)`;
+    }
+  }
+
+  return base;
+};
+
+const getStatusColor = (task) => {
+  if (!task) return 'bg-gray-500';
+
+  const evaluated = isTaskEvaluated(task);
+  const overdue = isOverdue(task.due_date, task.status);
+  const needsEvaluation =
+    !evaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  if (overdue && task.status !== 'completed' && task.status !== 'not_evaluated') {
+    return 'bg-red-500';
+  }
+
+  if (evaluated) return 'bg-green-500';
+  if (needsEvaluation) return 'bg-orange-500';
+  if (task.status === 'in_progress') return 'bg-blue-500';
+
+  return 'bg-yellow-500';
+};
+
+const getStatusTextColor = (task) => {
+  if (!task) return 'text-gray-700';
+
+  const evaluated = isTaskEvaluated(task);
+  const overdue = isOverdue(task.due_date, task.status);
+  const needsEvaluation =
+    !evaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  if (overdue && task.status !== 'completed' && task.status !== 'not_evaluated') {
+    return 'text-red-700';
+  }
+
+  if (evaluated) return 'text-green-700';
+  if (needsEvaluation) return 'text-orange-700';
+  if (task.status === 'in_progress') return 'text-blue-700';
+
+  return 'text-yellow-700';
+};
+
 const TaskDetails = () => {
   const { taskId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
+
+  // 👉 Infos de navigation (d’où on vient)
+  const navState = location.state || {};
+  const fromKanban = !!navState.fromKanban;
+  const fromViewType = navState.viewType || null;
+
+  // onglet du dashboard depuis lequel on vient (overview / tasks / calendar / etc.)
+  const fromDashboardTab =
+    navState.tab ||             
+    navState.activeTab ||       
+    navState.fromDashboardTab || 
+    null;
+
   const [task, setTask] = useState(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [showEvaluation, setShowEvaluation] = useState(false);
+  const [evaluating, setEvaluating] = useState(false);
+
+  // ✅ fetchTaskDetails mémoïsé
+  const fetchTaskDetails = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API}/tasks/${taskId}`, {
+        headers: getAuthHeaders()
+      });
+      
+      const taskData = response.data || {};
+
+      // 🔗 Normalisation des fichiers d’evidence
+      const evidenceFiles =
+        taskData.completion_evidence ||
+        taskData.evidence_files ||
+        [];
+
+      setTask({
+        ...taskData,
+        completion_evidence: Array.isArray(evidenceFiles) ? evidenceFiles : [],
+        attachments: Array.isArray(taskData.attachments) ? taskData.attachments : []
+      });
+      
+    } catch (error) {
+      console.error('❌ Error fetching task details:', error);
+      
+      if (error.response?.status === 404) {
+        toast.error('Task not found');
+      } else if (error.response?.status === 401) {
+        toast.error('Session expired. Please login again.');
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        navigate('/login');
+        return;
+      } else {
+        toast.error('Failed to load task details');
+      }
+      
+      navigate('/dashboard');
+    } finally {
+      setLoading(false);
+    }
+  }, [taskId, navigate]);
 
   useEffect(() => {
     fetchTaskDetails();
-  }, [taskId]);
+  }, [fetchTaskDetails]);
 
- const fetchTaskDetails = async () => {
-  try {
-    console.log('=== FETCHING TASK DETAILS ===');
-    console.log('Task ID:', taskId);
-    console.log('API URL:', `${API}/tasks/${taskId}`);
-    
-    const response = await axios.get(`${API}/tasks/${taskId}`);
-    
-    console.log('=== TASK DATA RECEIVED ===');
-    console.log('Full response:', response);
-    console.log('Task data:', response.data);
-    console.log('Completion evidence:', response.data.completion_evidence);
-    console.log('Evidence files:', response.data.evidence_files);
-    console.log('Attachments:', response.data.attachments);
-    
-    // Log all keys to see what's available
-    console.log('All keys in task data:', Object.keys(response.data));
-    
-    // Check if evidence exists in any form
-    if (response.data.completion_evidence) {
-      console.log('Completion evidence type:', typeof response.data.completion_evidence);
-      console.log('Completion evidence length:', response.data.completion_evidence.length);
-    }
-    if (response.data.evidence_files) {
-      console.log('Evidence files type:', typeof response.data.evidence_files);
-      console.log('Evidence files length:', response.data.evidence_files.length);
-    }
-    
-    console.log('=== END DEBUG ===');
-    
-    setTask(response.data);
-  } catch (error) {
-    console.error('Error fetching task details:', error);
-    console.error('Error response:', error.response);
-    toast.error('Failed to load task details');
-    navigate('/dashboard');
-  } finally {
-    setLoading(false);
-  }
-};
+  // ✅ Aligne avec TaskList / Kanban pour collaborator (completed → not_evaluated)
   const handleStatusUpdate = async (newStatus) => {
     setUpdating(true);
     try {
-      await axios.put(`${API}/tasks/${taskId}`, {
-        status: newStatus,
-        completed_at: newStatus === 'completed' ? new Date().toISOString() : null
-      });
-      toast.success('Task status updated successfully');
-      fetchTaskDetails();
+      const finalStatus =
+        user?.role === 'collaborator' && newStatus === 'completed'
+          ? 'not_evaluated'
+          : newStatus;
+
+      await axios.put(
+        `${API}/tasks/${taskId}`,
+        {
+          status: finalStatus,
+          completed_at:
+            finalStatus === 'completed' || finalStatus === 'not_evaluated'
+              ? new Date().toISOString()
+              : null,
+        },
+        { headers: getAuthHeaders() }
+      );
+      
+      toast.success(
+        user?.role === 'collaborator' && newStatus === 'completed'
+          ? 'Task completed! Waiting for manager evaluation.'
+          : 'Task status updated successfully'
+      );
+
+      await fetchTaskDetails();
+      
     } catch (error) {
       console.error('Error updating task:', error);
       toast.error('Failed to update task status');
@@ -94,52 +335,120 @@ const TaskDetails = () => {
     }
   };
 
-  const getStatusBadgeClass = (status) => {
-    const classes = {
-      pending: 'status-pending',
-      in_progress: 'status-in-progress',
-      completed: 'status-completed',
-      overdue: 'status-overdue'
-    };
-    return classes[status] || 'bg-gray-500';
+  // ✅ Manager peut évaluer ou ré-évaluer quand status = not_evaluated OU completed
+  const handleEvaluatePerformance = () => {
+    if (!task) return;
+
+    if (task.status !== 'not_evaluated' && task.status !== 'completed') {
+      toast.error('This task is not completed yet');
+      return;
+    }
+
+    setShowEvaluation(true);
   };
 
-  const getPriorityBadgeClass = (priority) => {
-    const classes = {
-      low: 'priority-low',
-      medium: 'priority-medium',
-      high: 'priority-high'
-    };
-    return classes[priority] || 'bg-gray-500';
+  const handleEvaluationComplete = async () => {
+    setShowEvaluation(false);
+    setEvaluating(true);
+    
+    try {
+      await fetchTaskDetails();
+      toast.success('Performance evaluation submitted successfully');
+    } catch (error) {
+      console.error('Error refreshing task after evaluation:', error);
+      toast.error('Error refreshing task data');
+    } finally {
+      setEvaluating(false);
+    }
+  };
+
+  // ✅ Peut-on évaluer / ré-évaluer ?
+  const canEvaluateTask = (task) => {
+    if (!task || !user) return false;
+    return (
+      user.role === 'manager' &&
+      (task.status === 'not_evaluated' || task.status === 'completed')
+    );
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
+    if (!dateString) return 'Unknown date';
+    
+    try {
+      return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (error) {
+      return 'Invalid date';
+    }
   };
 
-  const isOverdue = (dueDate, status) => {
-    return new Date(dueDate) < new Date() && status !== 'completed';
+  // ✅ Retour au dashboard (Tasks / Kanban si besoin)
+  const handleBack = () => {
+    const targetTab = fromDashboardTab || (fromKanban ? 'tasks' : 'overview');
+    const state = { tab: targetTab };
+
+    if (fromKanban) {
+      state.viewType = fromViewType || 'kanban';
+      state.fromKanban = true;
+    }
+
+    navigate('/dashboard', { state });
   };
 
-  const handleEvaluationComplete = () => {
-    setShowEvaluation(false);
-    toast.success('Performance evaluation submitted successfully');
+  // 👁️ View evidence → ouvre dans un nouvel onglet (preview route)
+  const viewEvidence = (evidence) => {
+    const fileName = getEvidenceFileName(evidence);
+    if (!fileName) {
+      toast.error('Invalid file name');
+      return;
+    }
+
+    const token = localStorage.getItem('token');
+    if (!token) {
+      toast.error('Please login again');
+      return;
+    }
+
+    const url = `${API}/files/evidence/preview/${encodeURIComponent(fileName)}?token=${encodeURIComponent(token)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
-  const downloadEvidence = (filename) => {
-    window.open(`${API}/files/evidence/${filename}`, '_blank');
+  // 💾 Download evidence → force le téléchargement
+  const downloadEvidence = (evidence) => {
+    const fileName = getEvidenceFileName(evidence);
+    if (!fileName) {
+      toast.error('Invalid file name');
+      return;
+    }
+    
+    const token = localStorage.getItem('token');
+    if (!token) {
+      toast.error('Please login again');
+      return;
+    }
+
+    const url = `${API}/files/evidence/${encodeURIComponent(fileName)}?token=${encodeURIComponent(token)}`;
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', fileName || 'evidence');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   };
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="loading-spinner"></div>
+        <div className="text-center">
+          <Loader className="h-8 w-8 animate-spin mx-auto mb-4 text-blue-600" />
+          <p className="text-slate-600">Loading task details...</p>
+        </div>
       </div>
     );
   }
@@ -150,7 +459,7 @@ const TaskDetails = () => {
         <div className="text-center">
           <h1 className="text-2xl font-bold text-slate-900 mb-4">Task Not Found</h1>
           <p className="text-slate-600 mb-6">The task you're looking for doesn't exist or you don't have access to it.</p>
-          <Button onClick={() => navigate('/dashboard')}>
+          <Button onClick={handleBack}>
             <ArrowLeft className="h-4 w-4 mr-2" />
             Back to Dashboard
           </Button>
@@ -159,15 +468,24 @@ const TaskDetails = () => {
     );
   }
 
+  const taskIsEvaluated = isTaskEvaluated(task);
+  const canEvaluate = canEvaluateTask(task);
+  const overdueFlag = isOverdue(task.due_date, task.status);
+  const needsEvaluation =
+    !taskIsEvaluated && (task.status === 'not_evaluated' || task.status === 'completed');
+
+  const evidenceList = Array.isArray(task.completion_evidence)
+    ? task.completion_evidence
+    : [];
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
-      {/* Header */}
       <header className="border-b border-slate-200/50 bg-white/80 backdrop-blur-sm sticky top-0 z-40">
         <div className="container-custom py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-4">
               <Button
-                onClick={() => navigate('/dashboard')}
+                onClick={handleBack}
                 variant="ghost"
                 size="sm"
                 className="text-slate-600 hover:text-slate-900"
@@ -181,14 +499,20 @@ const TaskDetails = () => {
             </div>
             
             <div className="flex items-center space-x-3">
-              {user?.role === 'manager' && task.status === 'completed' && (
+              {user?.role === 'manager' && (
                 <Button
-                  onClick={() => setShowEvaluation(true)}
-                  className="btn-primary"
+                  onClick={handleEvaluatePerformance}
+                  variant="default"
+                  className="bg-orange-500 hover:bg-orange-600 text-white shadow-lg"
                   data-testid="evaluate-performance-button"
+                  disabled={evaluating || !canEvaluate}
                 >
-                  <Award className="h-4 w-4 mr-2" />
-                  Evaluate Performance
+                  {evaluating ? (
+                    <Loader className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Award className="h-4 w-4 mr-2" />
+                  )}
+                  {taskIsEvaluated ? 'Re-evaluate Performance' : 'Evaluate Performance'}
                 </Button>
               )}
             </div>
@@ -196,26 +520,47 @@ const TaskDetails = () => {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="container-custom py-8">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Main Task Info */}
+          {/* Colonne principale : description, notes, evidences */}
           <div className="lg:col-span-2 space-y-6">
-            <Card className="glass-effect border-slate-200/50 animate-slideUp">
+            <Card className={`glass-effect border-slate-200/50 animate-slideUp ${
+              taskIsEvaluated
+                ? 'border-green-300 bg-green-50/20'
+                : needsEvaluation
+                  ? 'border-orange-300 bg-orange-50/20'
+                  : ''
+            }`}>
               <CardHeader>
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <CardTitle className="text-2xl font-bold text-slate-900 mb-2">
-                      {task.title}
+                      {task.title || 'Untitled Task'}
                     </CardTitle>
                     <div className="flex items-center space-x-3">
-                      <Badge className={`px-3 py-1 text-sm font-medium rounded-full ${getStatusBadgeClass(task.status)}`}>
-                        {task.status.replace('_', ' ').toUpperCase()}
+                      <Badge className={`px-3 py-1 text-sm font-medium rounded-full ${getStatusBadgeClass(task)}`}>
+                        {getDisplayStatus(task)}
                       </Badge>
+                      
                       <Badge className={`px-3 py-1 text-sm font-medium rounded-full ${getPriorityBadgeClass(task.priority)}`}>
-                        {task.priority.toUpperCase()} PRIORITY
+                        {(task.priority || 'medium').toUpperCase()} PRIORITY
                       </Badge>
-                      {isOverdue(task.due_date, task.status) && (
+                      
+                      {needsEvaluation && (
+                        <Badge className="px-3 py-1 text-sm font-medium rounded-full bg-orange-500 text-white border-orange-600">
+                          <Star className="h-3 w-3 mr-1" />
+                          AWAITING EVALUATION
+                        </Badge>
+                      )}
+                      
+                      {taskIsEvaluated && (
+                        <Badge className="px-3 py-1 text-sm font-medium rounded-full bg-green-500 text-white border-green-600">
+                          <Award className="h-3 w-3 mr-1" />
+                          EVALUATED
+                        </Badge>
+                      )}
+                      
+                      {overdueFlag && (
                         <Badge className="px-3 py-1 text-sm font-medium rounded-full bg-red-100 text-red-800">
                           <AlertTriangle className="h-3 w-3 mr-1" />
                           OVERDUE
@@ -239,7 +584,6 @@ const TaskDetails = () => {
                     </div>
                   </div>
 
-                  {/* Completion Notes */}
                   {task.completion_notes && (
                     <div>
                       <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
@@ -252,56 +596,52 @@ const TaskDetails = () => {
                     </div>
                   )}
 
-                  {/* Evidence Files */}
-                 {task.completion_evidence && task.completion_evidence.length > 0 && (
-  <div>
-    <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
-      <FileText className="h-5 w-5 mr-2 text-green-600" />
-      Evidence Files
-    </h3>
-    <div className="space-y-2">
-      {task.completion_evidence.map((evidence, index) => (
-        <div key={index} className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
-          <div className="flex items-center space-x-2">
-            <FileText className="h-4 w-4 text-green-600" />
-            <span className="text-slate-700">Evidence {index + 1}</span>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => downloadEvidence(evidence)}
-          >
-            <Download className="h-3 w-3" />
-          </Button>
-        </div>
-      ))}
-    </div>
-  </div>
-)}
-                  {/* Old Attachments (for backward compatibility) */}
-                  {task.attachments && task.attachments.length > 0 && (
+                  {evidenceList.length > 0 && (
                     <div>
-                      <h3 className="text-lg font-semibold text-slate-900 mb-3">Attachments</h3>
+                      <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
+                        <FileText className="h-5 w-5 mr-2 text-green-600" />
+                        Evidence Files
+                      </h3>
                       <div className="space-y-2">
-                        {task.attachments.map((attachment, index) => (
-                          <div key={index} className="p-3 bg-white border border-slate-200 rounded-lg">
-                            <p className="text-slate-700">{attachment}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                        {evidenceList.map((evidence, index) => {
+                          const label = getEvidenceLabel(evidence, index);
+                          return (
+                            <div
+                              key={index}
+                              className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg"
+                            >
+                              <div className="flex items-center space-x-2">
+                                <FileText className="h-4 w-4 text-green-600" />
+                                <span className="text-sm text-slate-800 truncate max-w-xs">
+                                  {label}
+                                </span>
+                              </div>
+                              <div className="flex items-center space-x-1">
+                                {/* 👁️ View */}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0 hover:bg-green-100"
+                                  onClick={() => viewEvidence(evidence)}
+                                  title="View evidence"
+                                >
+                                  <Eye className="h-3 w-3" />
+                                </Button>
 
-                  {/* Old Evidence Files (for backward compatibility) */}
-                  {task.evidence_files && task.evidence_files.length > 0 && (
-                    <div>
-                      <h3 className="text-lg font-semibold text-slate-900 mb-3">Evidence Files</h3>
-                      <div className="space-y-2">
-                        {task.evidence_files.map((evidence, index) => (
-                          <div key={index} className="p-3 bg-green-50 border border-green-200 rounded-lg">
-                            <p className="text-slate-700">{evidence}</p>
-                          </div>
-                        ))}
+                                {/* 💾 Download */}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0 hover:bg-green-100"
+                                  onClick={() => downloadEvidence(evidence)}
+                                  title="Download evidence"
+                                >
+                                  <Download className="h-3 w-3" />
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -310,8 +650,9 @@ const TaskDetails = () => {
             </Card>
           </div>
 
-          {/* Sidebar */}
+          {/* Colonne latérale : infos, statut, évaluation, completion */}
           <div className="space-y-6">
+            {/* Task Information */}
             <Card className="glass-effect border-slate-200/50 animate-slideUp" style={{animationDelay: '0.2s'}}>
               <CardHeader>
                 <CardTitle className="text-lg font-semibold text-slate-900">Task Information</CardTitle>
@@ -339,12 +680,29 @@ const TaskDetails = () => {
 
                 {task.completed_at && (
                   <div className="flex items-center space-x-3">
-                    <div className="p-2 bg-purple-100 rounded-lg">
-                      <CheckCircle className="h-5 w-5 text-purple-600" />
+                    <div className={`p-2 rounded-lg ${
+                      needsEvaluation ? 'bg-orange-100' : 
+                      taskIsEvaluated ? 'bg-green-100' : 'bg-purple-100'
+                    }`}>
+                      <CheckCircle className={`h-5 w-5 ${
+                        needsEvaluation ? 'text-orange-600' : 
+                        taskIsEvaluated ? 'text-green-600' : 'text-purple-600'
+                      }`} />
                     </div>
                     <div>
                       <p className="text-sm font-medium text-slate-700">Completed</p>
-                      <p className="text-slate-900">{formatDate(task.completed_at)}</p>
+                      <p className={`${
+                        needsEvaluation ? 'text-orange-700' : 
+                        taskIsEvaluated ? 'text-green-700' : 'text-slate-900'
+                      }`}>
+                        {formatDate(task.completed_at)}
+                        {needsEvaluation && (
+                          <span className="block text-xs text-orange-600 mt-1">Awaiting evaluation</span>
+                        )}
+                        {taskIsEvaluated && (
+                          <span className="block text-xs text-green-600 mt-1">Evaluation completed</span>
+                        )}
+                      </p>
                     </div>
                   </div>
                 )}
@@ -373,20 +731,16 @@ const TaskDetails = () => {
               <CardContent>
                 <div className="space-y-4">
                   <div className="flex items-center space-x-3">
-                    <div className={`w-3 h-3 rounded-full ${
-                      task.status === 'completed' ? 'bg-green-500' :
-                      task.status === 'in_progress' ? 'bg-blue-500' :
-                      isOverdue(task.due_date, task.status) ? 'bg-red-500' : 'bg-yellow-500'
-                    }`}></div>
+                    <div className={`w-3 h-3 rounded-full ${getStatusColor(task)}`}></div>
                     <div>
                       <p className="text-sm font-medium text-slate-900">Current Status</p>
-                      <p className="text-xs text-slate-600">
-                        {task.status.replace('_', ' ').charAt(0).toUpperCase() + task.status.replace('_', ' ').slice(1)}
+                      <p className={`text-xs ${getStatusTextColor(task)} font-medium`}>
+                        {getStatusMessage(task)}
                       </p>
                     </div>
                   </div>
 
-                  {task.status !== 'completed' && user?.role === 'collaborator' && (
+                  {task.status !== 'completed' && task.status !== 'not_evaluated' && user?.role === 'collaborator' && (
                     <div className="pt-4 border-t border-slate-200">
                       <Button
                         onClick={() => handleStatusUpdate('in_progress')}
@@ -400,13 +754,104 @@ const TaskDetails = () => {
                       </Button>
                     </div>
                   )}
+
+                  {needsEvaluation && user?.role === 'manager' && (
+                    <div className="pt-4 border-t border-slate-200">
+                      <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                        <p className="text-sm text-orange-800 font-medium mb-2">
+                          <Award className="h-4 w-4 inline mr-1" />
+                          Ready for Evaluation
+                        </p>
+                        <p className="text-xs text-orange-700">
+                          This task has been completed and is waiting for your performance evaluation.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {taskIsEvaluated && user?.role === 'manager' && (
+                    <div className="pt-4 border-t border-slate-200">
+                      <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <p className="text-sm text-green-800 font-medium mb-2">
+                          <Award className="h-4 w-4 inline mr-1" />
+                          Evaluation Completed
+                        </p>
+                        <p className="text-xs text-green-700">
+                          This task has been evaluated successfully.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
 
-            {/* Task Completion Section for Collaborators */}
-            {user?.role === 'collaborator' && task.status !== 'completed' && (
+            {/* Performance Evaluation - détails visibles quand la tâche est évaluée */}
+            {taskIsEvaluated && (
               <Card className="glass-effect border-slate-200/50 animate-slideUp" style={{animationDelay: '0.6s'}}>
+                <CardHeader>
+                  <CardTitle className="text-lg font-semibold text-slate-900 flex items-center">
+                    <Star className="h-5 w-5 mr-2 text-green-600" />
+                    Performance Evaluation
+                  </CardTitle>
+                  <CardDescription>
+                    Detailed scores and feedback for this task
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="space-y-2 text-sm">
+                    {isPositiveScore(task.punctuality_score) && (
+                      <div className="flex items-center space-x-2">
+                        <Clock className="h-4 w-4 text-green-600" />
+                        <span className="text-slate-800">
+                          <strong>Punctuality:</strong> {task.punctuality_score}/5
+                        </span>
+                      </div>
+                    )}
+
+                    {isPositiveScore(task.quality_score) && (
+                      <div className="flex items-center space-x-2">
+                        <Award className="h-4 w-4 text-green-600" />
+                        <span className="text-slate-800">
+                          <strong>Quality:</strong> {task.quality_score}/5
+                        </span>
+                      </div>
+                    )}
+
+                    {isPositiveScore(task.performance_rating) && (
+                      <div className="flex items-center space-x-2">
+                        <Star className="h-4 w-4 text-green-600" />
+                        <span className="text-slate-800">
+                          <strong>Overall Rating:</strong> {task.performance_rating}/5
+                        </span>
+                      </div>
+                    )}
+
+                    {task.evaluation_date && (
+                      <div className="flex items-center space-x-2">
+                        <Calendar className="h-4 w-4 text-green-600" />
+                        <span className="text-slate-800">
+                          <strong>Evaluated on:</strong> {formatDate(task.evaluation_date)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {task.feedback && task.feedback.trim() !== '' && (
+                    <div className="mt-2 p-3 bg-white rounded-lg border border-green-100">
+                      <p className="text-xs text-green-600 font-medium mb-1">Manager Feedback</p>
+                      <p className="text-sm text-slate-800 leading-relaxed">
+                        {task.feedback}
+                      </p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Bloc pour collaborateur pour compléter la tâche + upload */}
+            {user?.role === 'collaborator' && task.status !== 'completed' && task.status !== 'not_evaluated' && (
+              <Card className="glass-effect border-slate-200/50 animate-slideUp" style={{animationDelay: '0.8s'}}>
                 <CardHeader>
                   <CardTitle className="text-lg font-semibold text-slate-900">Complete and Upload File</CardTitle>
                   <CardDescription>
@@ -425,7 +870,6 @@ const TaskDetails = () => {
         </div>
       </main>
 
-      {/* Performance Evaluation Modal */}
       {showEvaluation && (
         <PerformanceEvaluationModal
           isOpen={showEvaluation}
@@ -433,6 +877,8 @@ const TaskDetails = () => {
           onComplete={handleEvaluationComplete}
           taskId={task.id}
           collaboratorId={task.assignee_id}
+          taskTitle={task.title}
+          collaboratorName={task.assignee_name}
         />
       )}
     </div>

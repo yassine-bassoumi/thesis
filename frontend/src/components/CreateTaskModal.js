@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,19 +7,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { CalendarIcon, Users, AlertTriangle, Clock, CheckCircle } from 'lucide-react';
+import { CalendarIcon, Users, AlertTriangle, Clock, CheckCircle, Loader } from 'lucide-react';
 import { format } from "date-fns";
 import { API } from '../App';
 import axios from 'axios';
 import { toast } from "sonner";
 
-const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
+const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators = [] }) => {
   const [formData, setFormData] = useState({
     title: '',
     description: '',
     assignee_id: '',
     due_date: null,
-    priority: 'medium'
+    priority: 'medium',
+    status: 'pending',
   });
   const [loading, setLoading] = useState(false);
 
@@ -32,30 +33,80 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.assignee_id || !formData.due_date) {
-      toast.error('Please fill in all required fields');
+    
+    if (!formData.title.trim()) {
+      toast.error('Task title is required');
+      return;
+    }
+    
+    if (!formData.assignee_id) {
+      toast.error('Please assign the task to a collaborator');
+      return;
+    }
+
+    if (!formData.due_date) {
+      toast.error('Due date is required');
       return;
     }
 
     setLoading(true);
     try {
-      await axios.post(`${API}/tasks`, {
+      const token = localStorage.getItem('token');
+
+      if (!token) {
+        toast.error('Authentication required. Please login again.');
+        setLoading(false);
+        return;
+      }
+      
+      const payload = {
         ...formData,
-        due_date: formData.due_date.toISOString()
+        status: 'pending',
+        due_date: formData.due_date.toISOString(),
+      };
+
+      const response = await axios.post(`${API}/tasks`, payload, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
       });
       
+      console.log('✅ Task created successfully:', response.data);
       toast.success('Task created successfully!');
-      onTaskCreated();
+
       setFormData({
         title: '',
         description: '',
         assignee_id: '',
         due_date: null,
-        priority: 'medium'
+        priority: 'medium',
+        status: 'pending',
       });
+      
+      if (onTaskCreated) {
+        onTaskCreated(response.data);
+      }
+      
+      onClose();
+      
     } catch (error) {
-      console.error('Error creating task:', error);
-      toast.error(error.response?.data?.detail || 'Failed to create task');
+      console.error('❌ Error creating task:', error);
+      
+      if (error.response?.data?.detail) {
+        if (Array.isArray(error.response.data.detail)) {
+          const errorMessages = error.response.data.detail.map(err => 
+            `${err.loc?.join('.') || 'unknown'}: ${err.msg}`
+          ).join(', ');
+          toast.error(`Validation errors: ${errorMessages}`);
+        } else {
+          toast.error(`Creation failed: ${error.response.data.detail}`);
+        }
+      } else if (error.response?.status) {
+        toast.error(`Server error: ${error.response.status} - ${error.response.statusText}`);
+      } else {
+        toast.error('Failed to create task. Please check your connection and try again.');
+      }
     } finally {
       setLoading(false);
     }
@@ -74,24 +125,80 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
     }
   };
 
+  const isPastDate = (date) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return date < today;
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      setFormData({
+        title: '',
+        description: '',
+        assignee_id: '',
+        due_date: null,
+        priority: 'medium',
+        status: 'pending',
+      });
+    }
+  }, [isOpen]);
+
+  // 🔥 STYLES FORCÉS POUR RÉSOUDRE LE PROBLÈME DE COULEUR
+  const modalStyles = {
+    dialogContent: {
+      backgroundColor: 'white',
+      color: 'black',
+      border: '1px solid #e2e8f0',
+      borderRadius: '8px',
+    },
+    input: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    textarea: {
+      backgroundColor: 'white', 
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    select: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    button: {
+      backgroundColor: '#2563eb',
+      color: 'white',
+    },
+    buttonOutline: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: '#374151',
+    }
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent 
+        className="max-w-2xl max-h-[90vh] overflow-y-auto"
+        style={modalStyles.dialogContent}
+      >
         <DialogHeader>
-          <DialogTitle className="text-2xl font-semibold text-slate-900 flex items-center">
-            <div className="p-2 bg-blue-100 rounded-lg mr-3">
-              <Users className="h-6 w-6 text-blue-600" />
+          <DialogTitle style={{ color: 'black' }} className="text-2xl font-semibold flex items-center">
+            <div style={{ backgroundColor: '#dbeafe', padding: '8px', borderRadius: '8px', marginRight: '12px' }}>
+              <Users style={{ color: '#2563eb', width: '24px', height: '24px' }} />
             </div>
             Create New Task
           </DialogTitle>
-          <DialogDescription className="text-slate-600">
+          <DialogDescription style={{ color: '#4b5563' }}>
             Assign a new task to a team member with deadline and priority settings.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit} className="space-y-6 mt-6">
           <div className="space-y-2">
-            <Label htmlFor="title" className="text-slate-700 font-medium">
+            <Label htmlFor="title" style={{ color: 'black' }} className="font-medium">
               Task Title *
             </Label>
             <Input
@@ -102,13 +209,13 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
               value={formData.title}
               onChange={handleInputChange}
               required
-              className="bg-white border-slate-200 h-12"
-              data-testid="task-title-input"
+              className="h-12"
+              style={modalStyles.input}
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="description" className="text-slate-700 font-medium">
+            <Label htmlFor="description" style={{ color: 'black' }} className="font-medium">
               Description
             </Label>
             <Textarea
@@ -118,71 +225,82 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
               value={formData.description}
               onChange={handleInputChange}
               rows={4}
-              className="bg-white border-slate-200 resize-none"
-              data-testid="task-description-input"
+              className="resize-none"
+              style={modalStyles.textarea}
             />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="space-y-2">
-              <Label htmlFor="assignee" className="text-slate-700 font-medium">
+              <Label htmlFor="assignee" style={{ color: 'black' }} className="font-medium">
                 Assign To *
               </Label>
               <Select 
+                value={formData.assignee_id}
                 onValueChange={(value) => setFormData({...formData, assignee_id: value})}
                 required
               >
-                <SelectTrigger className="bg-white border-slate-200 h-12" data-testid="assignee-select">
+                <SelectTrigger className="h-12" style={modalStyles.select}>
                   <SelectValue placeholder="Select collaborator" />
                 </SelectTrigger>
-                <SelectContent>
-                  {collaborators.map((collaborator) => (
-                    <SelectItem key={collaborator.id} value={collaborator.id} data-testid={`assignee-${collaborator.id}`}>
-                      <div className="flex items-center space-x-2">
-                        <div className="w-8 h-8 bg-gradient-to-r from-blue-400 to-purple-500 rounded-full flex items-center justify-center">
-                          <span className="text-white font-medium text-sm">
-                            {collaborator.full_name.charAt(0).toUpperCase()}
-                          </span>
+                <SelectContent style={{ backgroundColor: 'white', color: 'black', border: '1px solid #d1d5db' }}>
+                  {collaborators.length > 0 ? (
+                    collaborators.map((collaborator) => (
+                      <SelectItem 
+                        key={collaborator.id} 
+                        value={collaborator.id}
+                        style={{ color: 'black' }}
+                      >
+                        <div className="flex items-center space-x-2">
+                          <div className="w-8 h-8 bg-gradient-to-r from-blue-400 to-purple-500 rounded-full flex items-center justify-center">
+                            <span className="text-white font-medium text-sm">
+                              {collaborator.full_name?.charAt(0)?.toUpperCase() || 'U'}
+                            </span>
+                          </div>
+                          <div>
+                            <p style={{ color: 'black' }} className="font-medium">{collaborator.full_name || 'Unknown User'}</p>
+                            <p style={{ color: '#6b7280' }} className="text-xs">{collaborator.email || 'No email'}</p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="font-medium">{collaborator.full_name}</p>
-                          <p className="text-xs text-slate-500">{collaborator.email}</p>
-                        </div>
-                      </div>
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value="no-collaborators" disabled>
+                      No collaborators available
                     </SelectItem>
-                  ))}
+                  )}
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="priority" className="text-slate-700 font-medium">
+              <Label htmlFor="priority" style={{ color: 'black' }} className="font-medium">
                 Priority
               </Label>
               <Select 
+                value={formData.priority}
                 onValueChange={(value) => setFormData({...formData, priority: value})}
-                defaultValue="medium"
               >
-                <SelectTrigger className="bg-white border-slate-200 h-12" data-testid="priority-select">
+                <SelectTrigger className="h-12" style={modalStyles.select}>
                   <SelectValue placeholder="Select priority" />
                 </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="high" data-testid="priority-high">
+                <SelectContent style={{ backgroundColor: 'white', color: 'black', border: '1px solid #d1d5db' }}>
+                  <SelectItem value="high">
                     <div className="flex items-center space-x-2">
                       {getPriorityIcon('high')}
-                      <span>High Priority</span>
+                      <span style={{ color: 'black' }}>High Priority</span>
                     </div>
                   </SelectItem>
-                  <SelectItem value="medium" data-testid="priority-medium">
+                  <SelectItem value="medium">
                     <div className="flex items-center space-x-2">
                       {getPriorityIcon('medium')}
-                      <span>Medium Priority</span>
+                      <span style={{ color: 'black' }}>Medium Priority</span>
                     </div>
                   </SelectItem>
-                  <SelectItem value="low" data-testid="priority-low">
+                  <SelectItem value="low">
                     <div className="flex items-center space-x-2">
                       {getPriorityIcon('low')}
-                      <span>Low Priority</span>
+                      <span style={{ color: 'black' }}>Low Priority</span>
                     </div>
                   </SelectItem>
                 </SelectContent>
@@ -191,55 +309,60 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated, collaborators }) => {
           </div>
 
           <div className="space-y-2">
-            <Label className="text-slate-700 font-medium">
+            <Label style={{ color: 'black' }} className="font-medium">
               Due Date *
             </Label>
             <Popover>
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
-                  className={`w-full h-12 justify-start text-left font-normal bg-white border-slate-200 ${
-                    !formData.due_date && "text-slate-500"
+                  className={`w-full h-12 justify-start text-left font-normal ${
+                    !formData.due_date && "text-gray-500"
                   }`}
-                  data-testid="due-date-picker"
+                  style={modalStyles.buttonOutline}
                 >
                   <CalendarIcon className="mr-2 h-4 w-4" />
                   {formData.due_date ? format(formData.due_date, "PPP") : "Pick a due date"}
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-auto p-0" align="start">
+              <PopoverContent 
+                className="w-auto p-0" 
+                align="start" 
+                style={{ backgroundColor: 'white', color: 'black', border: '1px solid #d1d5db' }}
+              >
                 <Calendar
                   mode="single"
                   selected={formData.due_date}
                   onSelect={(date) => setFormData({...formData, due_date: date})}
-                  disabled={(date) => date < new Date()}
+                  disabled={isPastDate}
                   initialFocus
                 />
               </PopoverContent>
             </Popover>
           </div>
 
-          <div className="flex justify-end space-x-4 pt-6 border-t border-slate-200">
+          <div className="flex justify-end space-x-4 pt-6 border-t border-gray-200">
             <Button
               type="button"
-              variant="ghost"
+              variant="outline"
               onClick={onClose}
               className="px-6"
-              data-testid="cancel-task-button"
+              disabled={loading}
+              style={modalStyles.buttonOutline}
             >
               Cancel
             </Button>
             <Button
               type="submit"
               disabled={loading}
-              className="btn-primary px-6"
-              data-testid="create-task-submit"
+              className="px-6"
+              style={modalStyles.button}
             >
               {loading ? (
-                <div className="flex items-center">
-                  <div className="loading-spinner mr-2"></div>
+                <>
+                  <Loader className="h-4 w-4 mr-2 animate-spin" />
                   Creating...
-                </div>
+                </>
               ) : (
                 'Create Task'
               )}
