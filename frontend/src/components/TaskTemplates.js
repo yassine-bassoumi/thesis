@@ -1,4 +1,4 @@
-// components/TaskTemplates.js
+// src/components/TaskTemplates.js
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,28 +10,84 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Badge } from "@/components/ui/badge";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { CalendarIcon, Plus, FileText, Trash2, Users, Clock, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  CalendarIcon,
+  Plus,
+  FileText,
+  Trash2,
+  Users,
+  Clock,
+  AlertTriangle,
+  CheckCircle,
+  RefreshCw
+} from 'lucide-react';
 import { format } from "date-fns";
 import { API } from '../App';
 import axios from 'axios';
 import { toast } from "sonner";
 
-const TaskTemplates = ({ collaborators, onTaskCreated }) => {
+const getAuthHeaders = () => {
+  const token = localStorage.getItem('token');
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+};
+
+const TaskTemplates = ({ collaborators = [], onTaskCreated }) => {
   const [templates, setTemplates] = useState([]);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [showInstantiateForm, setShowInstantiateForm] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [instantiateData, setInstantiateData] = useState({
-    assignee_id: '',
+    assignee_ids: [],
     due_date: null
   });
+  const [isCreating, setIsCreating] = useState(false);
+  const [loadingTemplates, setLoadingTemplates] = useState(false);
+
   const [newTemplate, setNewTemplate] = useState({
     name: '',
     description: '',
     default_priority: 'medium',
-    estimated_duration_hours: 1,
-    category: 'general'
+    estimated_duration_hours: 1
   });
+
+  // 🔥 STYLES FORCÉS comme CreateTaskModal
+  const modalStyles = {
+    dialogContent: {
+      backgroundColor: 'white',
+      color: 'black',
+      border: '1px solid #e2e8f0',
+      borderRadius: '8px',
+    },
+    input: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    textarea: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    select: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: 'black',
+    },
+    button: {
+      backgroundColor: '#2563eb',
+      color: 'white',
+    },
+    buttonOutline: {
+      backgroundColor: 'white',
+      border: '1px solid #d1d5db',
+      color: '#374151',
+    }
+  };
 
   useEffect(() => {
     fetchTemplates();
@@ -39,64 +95,129 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
 
   const fetchTemplates = async () => {
     try {
-      const response = await axios.get(`${API}/task-templates`);
-      setTemplates(response.data);
+      setLoadingTemplates(true);
+      const response = await axios.get(`${API}/task-templates`, {
+        headers: getAuthHeaders()
+      });
+      setTemplates(response.data || []);
     } catch (error) {
       console.error('Error fetching templates:', error);
+      toast.error('Failed to load task templates');
+    } finally {
+      setLoadingTemplates(false);
     }
   };
 
   const createTemplate = async (e) => {
     e.preventDefault();
+
+    if (!newTemplate.name.trim()) {
+      toast.error('Template name is required');
+      return;
+    }
+
     try {
-      await axios.post(`${API}/task-templates`, newTemplate);
+      setIsCreating(true);
+      await axios.post(
+        `${API}/task-templates`,
+        newTemplate,
+        { headers: getAuthHeaders() }
+      );
+
       toast.success('Template created successfully!');
       setShowCreateForm(false);
+
       setNewTemplate({
         name: '',
         description: '',
         default_priority: 'medium',
-        estimated_duration_hours: 1,
-        category: 'general'
+        estimated_duration_hours: 1
       });
-      fetchTemplates();
+
+      await fetchTemplates();
     } catch (error) {
       console.error('Error creating template:', error);
       toast.error('Failed to create template');
+    } finally {
+      setIsCreating(false);
     }
   };
 
+  const handleCollaboratorToggle = (collaboratorId) => {
+    setInstantiateData(prev => {
+      const currentIds = prev.assignee_ids || [];
+      if (currentIds.includes(collaboratorId)) {
+        return {
+          ...prev,
+          assignee_ids: currentIds.filter(id => id !== collaboratorId)
+        };
+      } else {
+        return {
+          ...prev,
+          assignee_ids: [...currentIds, collaboratorId]
+        };
+      }
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setInstantiateData(prev => {
+      const allIds = collaborators.map(c => c.id);
+      const currentIds = prev.assignee_ids || [];
+
+      if (currentIds.length === collaborators.length) {
+        return { ...prev, assignee_ids: [] };
+      } else {
+        return { ...prev, assignee_ids: allIds };
+      }
+    });
+  };
+
   const instantiateTemplate = async () => {
-    if (!instantiateData.assignee_id || !instantiateData.due_date) {
-      toast.error('Please select assignee and due date');
+    if (!selectedTemplate) {
+      toast.error('No template selected');
       return;
     }
 
-    console.log('🎯 Instantiating template:', {
-      templateId: selectedTemplate.id,
-      assigneeId: instantiateData.assignee_id,
-      dueDate: instantiateData.due_date.toISOString()
-    });
+    if (!instantiateData.assignee_ids || instantiateData.assignee_ids.length === 0) {
+      toast.error('Please select at least one collaborator');
+      return;
+    }
 
+    if (!instantiateData.due_date) {
+      toast.error('Please select a due date');
+      return;
+    }
+
+    setIsCreating(true);
     try {
-      // 🔥 CORRECTION : Utilise les query parameters au lieu du body
-      const response = await axios.post(
-        `${API}/task-templates/${selectedTemplate.id}/instantiate?assignee_id=${instantiateData.assignee_id}&due_date=${encodeURIComponent(instantiateData.due_date.toISOString())}`
+      const tasks = await Promise.all(
+        instantiateData.assignee_ids.map(assignee_id =>
+          axios.post(
+            `${API}/task-templates/${selectedTemplate.id}/instantiate`,
+            {
+              assignee_id: assignee_id,
+              due_date: instantiateData.due_date.toISOString()
+            },
+            { headers: getAuthHeaders() }
+          )
+        )
       );
-      
-      console.log('✅ Template instantiated:', response.data);
-      toast.success('Task created from template!');
+
+      toast.success(`Created ${tasks.length} task(s) successfully!`);
+
       setShowInstantiateForm(false);
       setSelectedTemplate(null);
-      setInstantiateData({ assignee_id: '', due_date: null });
-      onTaskCreated();
+      setInstantiateData({ assignee_ids: [], due_date: null });
+
+      if (typeof onTaskCreated === 'function') {
+        onTaskCreated();
+      }
     } catch (error) {
-      console.error('❌ Error instantiating template:', {
-        status: error.response?.status,
-        data: error.response?.data,
-        url: error.config?.url
-      });
-      toast.error('Failed to create task from template');
+      console.error('Error instantiating template:', error);
+      toast.error('Failed to create tasks from template');
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -106,7 +227,9 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
     }
 
     try {
-      await axios.delete(`${API}/task-templates/${templateId}`);
+      await axios.delete(`${API}/task-templates/${templateId}`, {
+        headers: getAuthHeaders()
+      });
       toast.success('Template deleted successfully!');
       fetchTemplates();
     } catch (error) {
@@ -128,23 +251,15 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
     }
   };
 
-  const getPriorityBadge = (priority) => {
-    const classes = {
-      high: 'bg-red-100 text-red-800',
-      medium: 'bg-yellow-100 text-yellow-800',
-      low: 'bg-green-100 text-green-800'
-    };
-    return classes[priority] || 'bg-gray-100 text-gray-800';
-  };
-
   return (
     <div className="space-y-6">
+      {/* Header + bouton New Template */}
       <div className="flex justify-between items-center">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Task Templates</h2>
           <p className="text-slate-600">Create and manage reusable task templates</p>
         </div>
-        
+
         <Dialog open={showCreateForm} onOpenChange={setShowCreateForm}>
           <DialogTrigger asChild>
             <Button className="btn-primary">
@@ -152,79 +267,137 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
               New Template
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl">
+          <DialogContent
+            className="max-w-2xl max-h-[90vh] overflow-y-auto"
+            style={modalStyles.dialogContent}
+          >
             <DialogHeader>
-              <DialogTitle>Create Task Template</DialogTitle>
-              <DialogDescription>
-                Create a reusable template for common tasks
+              <DialogTitle
+                className="text-2xl font-semibold"
+                style={{ color: 'black' }}
+              >
+                Create Task Template
+              </DialogTitle>
+              <DialogDescription style={{ color: '#4b5563' }}>
+                Create a reusable template for common tasks.
               </DialogDescription>
             </DialogHeader>
-            
-            <form onSubmit={createTemplate} className="space-y-4">
+
+            {/* Formulaire de création */}
+            <form onSubmit={createTemplate} className="space-y-4 mt-4">
               <div className="space-y-2">
-                <Label>Template Name</Label>
+                <Label htmlFor="name" style={{ color: 'black' }} className="font-medium">
+                  Template Name *
+                </Label>
                 <Input
-                  value={newTemplate.name}
-                  onChange={(e) => setNewTemplate({...newTemplate, name: e.target.value})}
+                  id="name"
                   placeholder="Enter template name"
+                  value={newTemplate.name}
+                  onChange={(e) =>
+                    setNewTemplate({ ...newTemplate, name: e.target.value })
+                  }
                   required
+                  className="h-11"
+                  style={modalStyles.input}
                 />
               </div>
-              
+
               <div className="space-y-2">
-                <Label>Description</Label>
+                <Label htmlFor="description" style={{ color: 'black' }} className="font-medium">
+                  Description
+                </Label>
                 <Textarea
+                  id="description"
+                  placeholder="Describe the template purpose and requirements"
                   value={newTemplate.description}
-                  onChange={(e) => setNewTemplate({...newTemplate, description: e.target.value})}
-                  placeholder="Enter template description"
-                  rows={4}
+                  onChange={(e) =>
+                    setNewTemplate({ ...newTemplate, description: e.target.value })
+                  }
+                  rows={3}
+                  className="resize-none"
+                  style={modalStyles.textarea}
                 />
               </div>
-              
-              <div className="grid grid-cols-2 gap-4">
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Default Priority</Label>
-                  <Select 
+                  <Label htmlFor="priority" style={{ color: 'black' }} className="font-medium">
+                    Default Priority
+                  </Label>
+                  <Select
                     value={newTemplate.default_priority}
-                    onValueChange={(value) => setNewTemplate({...newTemplate, default_priority: value})}
+                    onValueChange={(value) =>
+                      setNewTemplate({ ...newTemplate, default_priority: value })
+                    }
                   >
-                    <SelectTrigger>
-                      <SelectValue />
+                    <SelectTrigger className="h-11" style={modalStyles.select}>
+                      <SelectValue placeholder="Select priority" />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent
+                      style={{
+                        backgroundColor: 'white',
+                        color: 'black',
+                        border: '1px solid #d1d5db'
+                      }}
+                    >
                       <SelectItem value="low">Low</SelectItem>
                       <SelectItem value="medium">Medium</SelectItem>
                       <SelectItem value="high">High</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                
+
                 <div className="space-y-2">
-                  <Label>Estimated Hours</Label>
+                  <Label htmlFor="duration" style={{ color: 'black' }} className="font-medium">
+                    Estimated Duration (hours)
+                  </Label>
                   <Input
+                    id="duration"
                     type="number"
-                    value={newTemplate.estimated_duration_hours}
-                    onChange={(e) => setNewTemplate({...newTemplate, estimated_duration_hours: parseInt(e.target.value)})}
                     min="1"
+                    max="100"
+                    value={newTemplate.estimated_duration_hours}
+                    onChange={(e) =>
+                      setNewTemplate({
+                        ...newTemplate,
+                        estimated_duration_hours:
+                          parseInt(e.target.value, 10) || 1
+                      })
+                    }
+                    className="h-11"
+                    style={modalStyles.input}
                   />
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label>Category</Label>
-                <Input
-                  value={newTemplate.category}
-                  onChange={(e) => setNewTemplate({...newTemplate, category: e.target.value})}
-                  placeholder="e.g., marketing, development, design"
-                />
-              </div>
-              
-              <div className="flex justify-end space-x-2 pt-4">
-                <Button type="button" variant="ghost" onClick={() => setShowCreateForm(false)}>
+              <div className="flex justify-end space-x-2 pt-4 border-t border-gray-200 mt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setShowCreateForm(false)}
+                  disabled={isCreating}
+                  className="px-5"
+                  style={modalStyles.buttonOutline}
+                >
                   Cancel
                 </Button>
-                <Button type="submit" className="btn-primary">
-                  Create Template
+                <Button
+                  type="submit"
+                  className="px-5"
+                  disabled={isCreating}
+                  style={modalStyles.button}
+                >
+                  {isCreating ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="h-4 w-4 mr-2" />
+                      Create Template
+                    </>
+                  )}
                 </Button>
               </div>
             </form>
@@ -232,159 +405,237 @@ const TaskTemplates = ({ collaborators, onTaskCreated }) => {
         </Dialog>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {templates.map((template) => (
-          <Card key={template.id} className="hover:shadow-lg transition-shadow border-slate-200/50">
-            <CardHeader className="pb-3">
-              <div className="flex justify-between items-start">
-                <div className="flex items-center space-x-2">
-                  <FileText className="h-5 w-5 text-blue-500" />
-                  <CardTitle className="text-lg">{template.name}</CardTitle>
+      {/* Liste des templates */}
+      {loadingTemplates ? (
+        <div className="text-center py-10 text-slate-500">
+          Loading templates...
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {templates.map((template) => (
+            <Card
+              key={template.id}
+              className="hover:shadow-lg transition-shadow bg-white/90"
+            >
+              <CardHeader className="pb-3">
+                <div className="flex justify-between items-start">
+                  <div className="flex items-center space-x-2">
+                    <FileText className="h-5 w-5 text-blue-500" />
+                    <CardTitle className="text-lg text-slate-900">
+                      {template.name}
+                    </CardTitle>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => deleteTemplate(template.id)}
+                    className="h-8 w-8 p-0 text-slate-400 hover:text-red-500"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => deleteTemplate(template.id)}
-                  className="h-8 w-8 p-0 text-slate-400 hover:text-red-500"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-              <CardDescription className="line-clamp-2">
-                {template.description}
-              </CardDescription>
-            </CardHeader>
-            
-            <CardContent className="space-y-3">
-              <div className="flex items-center justify-between text-sm">
-                <div className="flex items-center space-x-2">
-                  {getPriorityIcon(template.default_priority)}
-                  <Badge className={`${getPriorityBadge(template.default_priority)} capitalize`}>
-                    {template.default_priority}
+                <CardDescription className="line-clamp-2 text-slate-600">
+                  {template.description}
+                </CardDescription>
+              </CardHeader>
+
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center space-x-2 text-slate-700">
+                    {getPriorityIcon(template.default_priority)}
+                    <span className="capitalize">
+                      {template.default_priority} priority
+                    </span>
+                  </div>
+                  <Badge variant="secondary">
+                    {template.usage_count || 0} uses
                   </Badge>
                 </div>
-                <Badge variant="secondary" className="bg-blue-100 text-blue-700">
-                  {template.usage_count || 0} uses
-                </Badge>
-              </div>
-              
-              <div className="flex items-center justify-between text-sm text-slate-600">
-                <div className="flex items-center">
+
+                <div className="flex items-center text-sm text-slate-600">
                   <Clock className="h-4 w-4 mr-1" />
                   {template.estimated_duration_hours}h estimated
                 </div>
-                {template.category && (
-                  <Badge variant="outline" className="text-xs">
-                    {template.category}
-                  </Badge>
-                )}
-              </div>
-              
-              <div className="flex space-x-2">
+
                 <Button
-                  className="flex-1"
+                  className="w-full"
                   onClick={() => {
                     setSelectedTemplate(template);
+                    setInstantiateData({ assignee_ids: [], due_date: null });
                     setShowInstantiateForm(true);
                   }}
                 >
                   <Users className="h-4 w-4 mr-2" />
                   Use Template
                 </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-        
-        {templates.length === 0 && (
-          <div className="col-span-full text-center py-12 text-slate-500">
-            <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p className="text-lg font-medium mb-2">No templates yet</p>
-            <p className="text-sm">Create your first template to get started</p>
-          </div>
-        )}
-      </div>
+              </CardContent>
+            </Card>
+          ))}
 
-      {/* Instantiate Template Dialog */}
+          {templates.length === 0 && !loadingTemplates && (
+            <div className="col-span-full text-center py-12 text-slate-500">
+              <FileText className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <p>No templates yet</p>
+              <p className="text-sm">
+                Create your first template to get started
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Modal pour instancier un template */}
       <Dialog open={showInstantiateForm} onOpenChange={setShowInstantiateForm}>
-        <DialogContent>
+        <DialogContent
+          className="max-w-2xl max-h-[90vh] overflow-y-auto"
+          style={modalStyles.dialogContent}
+        >
           <DialogHeader>
-            <DialogTitle>Create Task from Template</DialogTitle>
-            <DialogDescription>
-              Assign "{selectedTemplate?.name}" to a team member
+            <DialogTitle
+              className="text-2xl font-semibold"
+              style={{ color: 'black' }}
+            >
+              Create Task from Template
+            </DialogTitle>
+            <DialogDescription style={{ color: '#4b5563' }}>
+              Assign "{selectedTemplate?.name}" to team members.
             </DialogDescription>
           </DialogHeader>
-          
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <Label>Assign To</Label>
-              <Select 
-                value={instantiateData.assignee_id}
-                onValueChange={(value) => setInstantiateData({...instantiateData, assignee_id: value})}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select collaborator" />
-                </SelectTrigger>
-                <SelectContent>
+
+          <div className="space-y-4 mt-4">
+            {/* Choix des collaborateurs */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <Label style={{ color: 'black' }} className="font-medium">
+                  Assign To
+                </Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleSelectAll}
+                  style={modalStyles.buttonOutline}
+                >
+                  {instantiateData.assignee_ids?.length === collaborators.length
+                    ? 'Deselect All'
+                    : 'Select All'}
+                </Button>
+              </div>
+
+              <div className="border rounded-lg p-4 max-h-60 overflow-y-auto bg-white">
+                <div className="space-y-3">
                   {collaborators.map((collaborator) => (
-                    <SelectItem key={collaborator.id} value={collaborator.id}>
-                      <div className="flex items-center space-x-2">
-                        <div className="w-6 h-6 bg-gradient-to-r from-blue-400 to-purple-500 rounded-full flex items-center justify-center">
-                          <span className="text-white font-medium text-xs">
-                            {collaborator.full_name.charAt(0).toUpperCase()}
-                          </span>
-                        </div>
-                        <span>{collaborator.full_name}</span>
+                    <div
+                      key={collaborator.id}
+                      className="flex items-center space-x-3 p-3 hover:bg-slate-50 rounded-lg cursor-pointer"
+                      onClick={() => handleCollaboratorToggle(collaborator.id)}
+                    >
+                      <Checkbox
+                        checked={
+                          instantiateData.assignee_ids?.includes(
+                            collaborator.id
+                          ) || false
+                        }
+                        onCheckedChange={() =>
+                          handleCollaboratorToggle(collaborator.id)
+                        }
+                      />
+                      <div className="flex-1">
+                        <p className="font-medium text-slate-900">
+                          {collaborator.full_name}
+                        </p>
+                        <p className="text-sm text-slate-600">
+                          {collaborator.email}
+                        </p>
                       </div>
-                    </SelectItem>
+                      <Users className="h-4 w-4 text-slate-400" />
+                    </div>
                   ))}
-                </SelectContent>
-              </Select>
+                </div>
+              </div>
+
+              <div className="text-sm text-slate-600">
+                {instantiateData.assignee_ids?.length || 0} collaborator(s) selected
+              </div>
             </div>
-            
+
+            {/* Due date */}
             <div className="space-y-2">
-              <Label>Due Date</Label>
+              <Label style={{ color: 'black' }} className="font-medium">
+                Due Date
+              </Label>
               <Popover>
                 <PopoverTrigger asChild>
                   <Button
                     variant="outline"
-                    className={`w-full justify-start text-left font-normal ${
+                    className={`w-full justify-start text-left font-normal h-11 ${
                       !instantiateData.due_date && "text-slate-500"
                     }`}
+                    style={modalStyles.buttonOutline}
                   >
                     <CalendarIcon className="mr-2 h-4 w-4" />
-                    {instantiateData.due_date ? format(instantiateData.due_date, "PPP") : "Pick a due date"}
+                    {instantiateData.due_date
+                      ? format(instantiateData.due_date, "PPP")
+                      : "Pick a due date"}
                   </Button>
                 </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
+                <PopoverContent
+                  className="w-auto p-0"
+                  align="start"
+                  style={{
+                    backgroundColor: 'white',
+                    color: 'black',
+                    border: '1px solid #d1d5db'
+                  }}
+                >
                   <Calendar
                     mode="single"
                     selected={instantiateData.due_date}
-                    onSelect={(date) => setInstantiateData({...instantiateData, due_date: date})}
-                    disabled={(date) => date < new Date()}
+                    onSelect={(date) =>
+                      setInstantiateData({
+                        ...instantiateData,
+                        due_date: date
+                      })
+                    }
+                    disabled={(date) =>
+                      date < new Date(new Date().setHours(0, 0, 0, 0))
+                    }
                     initialFocus
                   />
                 </PopoverContent>
               </Popover>
             </div>
 
-            {selectedTemplate && (
-              <div className="p-3 bg-slate-50 rounded-lg border">
-                <h4 className="font-medium text-sm mb-2">Template Details:</h4>
-                <div className="text-sm text-slate-600 space-y-1">
-                  <div>Priority: <span className="capitalize">{selectedTemplate.default_priority}</span></div>
-                  <div>Estimated: {selectedTemplate.estimated_duration_hours} hours</div>
-                  {selectedTemplate.category && <div>Category: {selectedTemplate.category}</div>}
-                </div>
-              </div>
-            )}
-            
-            <div className="flex justify-end space-x-2 pt-4">
-              <Button variant="ghost" onClick={() => setShowInstantiateForm(false)}>
+            <div className="flex justify-end space-x-2 pt-4 border-t border-gray-200 mt-4">
+              <Button
+                variant="outline"
+                onClick={() => setShowInstantiateForm(false)}
+                disabled={isCreating}
+                className="px-5"
+                style={modalStyles.buttonOutline}
+              >
                 Cancel
               </Button>
-              <Button onClick={instantiateTemplate} className="btn-primary">
-                Create Task
+              <Button
+                onClick={instantiateTemplate}
+                className="px-5"
+                style={modalStyles.button}
+                disabled={
+                  !instantiateData.assignee_ids?.length ||
+                  !instantiateData.due_date ||
+                  isCreating
+                }
+              >
+                {isCreating ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin mr-2" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Users className="h-4 w-4 mr-2" />
+                    Create {instantiateData.assignee_ids?.length || 0} Task(s)
+                  </>
+                )}
               </Button>
             </div>
           </div>

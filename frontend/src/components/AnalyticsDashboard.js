@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -16,17 +14,15 @@ import {
 } from 'chart.js';
 import { Line, Bar, Pie, Doughnut } from 'react-chartjs-2';
 import { 
-  Download, 
   TrendingUp, 
   Users, 
   Clock, 
   Target,
   Calendar,
   BarChart3,
-  PieChart
+  PieChart,
+  Loader2
 } from 'lucide-react';
-import axios from 'axios';
-import { API } from '../App';
 import ExportManager from './ExportManager';
 
 // Register Chart.js components
@@ -42,48 +38,66 @@ ChartJS.register(
   ArcElement
 );
 
-const AnalyticsDashboard = ({ stats, tasks, users }) => {
+const AnalyticsDashboard = ({ stats = {}, tasks = [], users = [] }) => {
   const [analyticsData, setAnalyticsData] = useState({});
-  const [timeRange, setTimeRange] = useState('month'); // week, month, quarter
+  const [timeRange, setTimeRange] = useState('month'); // reserved if you extend later
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     processAnalyticsData();
+   // eslint-disable-next-line
+
   }, [tasks, users, timeRange]);
 
   const processAnalyticsData = () => {
     setLoading(true);
-    
-    // 1. Task Completion Trend (Last 7 days)
+
+    const safeTasks = Array.isArray(tasks) ? tasks : [];
+    const safeUsers = Array.isArray(users) ? users : [];
+
+    // 1. Last 7 days labels
     const last7Days = Array.from({ length: 7 }, (_, i) => {
       const date = new Date();
       date.setDate(date.getDate() - (6 - i));
       return date.toISOString().split('T')[0];
     });
 
+    // 1. Task Completion Trend (by completed_at date)
     const completionTrend = last7Days.map(date => {
-      const completedOnDate = tasks.filter(task => 
+      const completedOnDate = safeTasks.filter(task => 
         task.completed_at && task.completed_at.split('T')[0] === date
       ).length;
       return completedOnDate;
     });
 
-    // 2. Task Status Distribution
+    // Helper for overdue (aligné avec ton TaskList)
+    const isOverdue = (task) => {
+      if (!task?.due_date) return false;
+      const due = new Date(task.due_date);
+      const now = new Date();
+      return (
+        due < now &&
+        task.status !== 'completed' &&
+        task.status !== 'not_evaluated'
+      );
+    };
+
+    // 2. Task Status Distribution (avec overdue calculé)
     const statusCounts = {
-      completed: tasks.filter(t => t.status === 'completed').length,
-      pending: tasks.filter(t => t.status === 'pending').length,
-      in_progress: tasks.filter(t => t.status === 'in_progress').length,
-      overdue: tasks.filter(t => t.status === 'overdue').length,
+      completed: safeTasks.filter(t => t.status === 'completed').length,
+      pending: safeTasks.filter(t => t.status === 'pending').length,
+      in_progress: safeTasks.filter(t => t.status === 'in_progress').length,
+      overdue: safeTasks.filter(t => isOverdue(t)).length,
     };
 
     // 3. Performance by Collaborator
-    const collaborators = users.filter(u => u.role === 'collaborator');
+    const collaborators = safeUsers.filter(u => u.role === 'collaborator');
     const performanceData = collaborators.map(collaborator => {
-      const userTasks = tasks.filter(t => t.assignee_id === collaborator.id);
+      const userTasks = safeTasks.filter(t => t.assignee_id === collaborator.id);
       const completedTasks = userTasks.filter(t => t.status === 'completed').length;
       const totalTasks = userTasks.length;
       return {
-        name: collaborator.full_name,
+        name: collaborator.full_name || collaborator.email || 'Unknown',
         completed: completedTasks,
         total: totalTasks,
         rate: totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0
@@ -92,9 +106,9 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
 
     // 4. Priority Distribution
     const priorityCounts = {
-      high: tasks.filter(t => t.priority === 'high').length,
-      medium: tasks.filter(t => t.priority === 'medium').length,
-      low: tasks.filter(t => t.priority === 'low').length,
+      high: safeTasks.filter(t => t.priority === 'high').length,
+      medium: safeTasks.filter(t => t.priority === 'medium').length,
+      low: safeTasks.filter(t => t.priority === 'low').length,
     };
 
     setAnalyticsData({
@@ -108,7 +122,8 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
     setLoading(false);
   };
 
-  // Chart configurations
+  // === Chart configurations ===
+
   const lineChartOptions = {
     responsive: true,
     plugins: {
@@ -239,12 +254,29 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
     ],
   };
 
-  // Export functionality moved to ExportManager component
+  const avgCompletionRate =
+    analyticsData.performanceData?.length > 0
+      ? (
+          analyticsData.performanceData.reduce((sum, p) => sum + p.rate, 0) /
+          analyticsData.performanceData.length
+        ).toFixed(1)
+      : '0.0';
+
+  const totalCompletedThisWeek =
+    analyticsData.completionTrend?.reduce((sum, count) => sum + count, 0) || 0;
+
+  const avgTasksPerDay =
+    analyticsData.completionTrend?.length > 0
+      ? (totalCompletedThisWeek / 7).toFixed(1)
+      : '0.0';
 
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
-        <div className="loading-spinner"></div>
+        <div className="flex flex-col items-center text-slate-600">
+          <Loader2 className="h-8 w-8 animate-spin mb-3" />
+          <span>Loading analytics...</span>
+        </div>
       </div>
     );
   }
@@ -252,7 +284,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
   return (
     <div className="space-y-6">
       {/* Header with Export Options */}
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-3">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Analytics Dashboard</h2>
           <p className="text-slate-600">Comprehensive insights into team performance</p>
@@ -272,12 +304,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600">Avg Completion Rate</p>
-                <p className="text-2xl font-bold">
-                  {analyticsData.performanceData?.length > 0 
-                    ? `${(analyticsData.performanceData.reduce((sum, p) => sum + p.rate, 0) / analyticsData.performanceData.length).toFixed(1)}%`
-                    : '0%'
-                  }
-                </p>
+                <p className="text-2xl font-bold">{avgCompletionRate}%</p>
               </div>
               <Target className="h-8 w-8 text-blue-500" />
             </div>
@@ -289,7 +316,9 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600">Active Collaborators</p>
-                <p className="text-2xl font-bold">{users.filter(u => u.role === 'collaborator').length}</p>
+                <p className="text-2xl font-bold">
+                  {users.filter(u => u.role === 'collaborator').length}
+                </p>
               </div>
               <Users className="h-8 w-8 text-green-500" />
             </div>
@@ -301,7 +330,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600">Tasks This Week</p>
-                <p className="text-2xl font-bold">{analyticsData.completionTrend?.reduce((sum, count) => sum + count, 0) || 0}</p>
+                <p className="text-2xl font-bold">{totalCompletedThisWeek}</p>
               </div>
               <Calendar className="h-8 w-8 text-purple-500" />
             </div>
@@ -313,12 +342,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-slate-600">Avg Tasks/Day</p>
-                <p className="text-2xl font-bold">
-                  {analyticsData.completionTrend?.length > 0 
-                    ? (analyticsData.completionTrend.reduce((sum, count) => sum + count, 0) / 7).toFixed(1)
-                    : '0'
-                  }
-                </p>
+                <p className="text-2xl font-bold">{avgTasksPerDay}</p>
               </div>
               <Clock className="h-8 w-8 text-orange-500" />
             </div>
@@ -389,7 +413,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
         </CardHeader>
         <CardContent>
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="w-full text-sm">
               <thead>
                 <tr className="border-b">
                   <th className="text-left py-2">Collaborator</th>
@@ -401,7 +425,7 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
               </thead>
               <tbody>
                 {analyticsData.performanceData?.map((collaborator, index) => (
-                  <tr key={index} className="border-b">
+                  <tr key={index} className="border-b last:border-0">
                     <td className="py-3 font-medium">{collaborator.name}</td>
                     <td className="py-3">{collaborator.total}</td>
                     <td className="py-3">{collaborator.completed}</td>
@@ -410,12 +434,20 @@ const AnalyticsDashboard = ({ stats, tasks, users }) => {
                       <div className="w-full bg-gray-200 rounded-full h-2">
                         <div 
                           className="bg-blue-600 h-2 rounded-full" 
-                          style={{ width: `${collaborator.rate}%` }}
+                          style={{ width: `${Math.min(collaborator.rate, 100)}%` }}
                         ></div>
                       </div>
                     </td>
                   </tr>
                 ))}
+
+                {(!analyticsData.performanceData || analyticsData.performanceData.length === 0) && (
+                  <tr>
+                    <td colSpan={5} className="py-4 text-center text-slate-500">
+                      No collaborator performance data available.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

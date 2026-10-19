@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from '../App';
 import { Eye, EyeOff, Users, CheckCircle } from 'lucide-react';
+import { toast } from "sonner";
 
 const LoginPage = () => {
   const { login, register, loading, error } = useAuth();
@@ -34,22 +35,40 @@ const LoginPage = () => {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+
+    if (!formData.email || !formData.password) {
+      toast.error("Please fill in both email and password.");
+      return;
+    }
+
     try {
       await login(formData.email, formData.password);
-    } catch (error) {
-      console.error('Login error:', error);
+      toast.success("Signed in successfully.");
+    } catch (err) {
+      console.error('Login error:', err);
+      toast.error("Failed to sign in. Please check your credentials.");
     }
   };
 
   const handleRegister = async (e) => {
     e.preventDefault();
-    if (!formData.role) {
+
+    if (!formData.fullName || !formData.email || !formData.password) {
+      toast.error("Please complete all required fields.");
       return;
     }
+
+    if (!formData.role) {
+      toast.error("Please select your role before creating an account.");
+      return;
+    }
+
     try {
       await register(formData.email, formData.password, formData.fullName, formData.role);
-    } catch (error) {
-      console.error('Register error:', error);
+      toast.success("Account created successfully. You can now sign in.");
+    } catch (err) {
+      console.error('Register error:', err);
+      toast.error("Failed to create account. Please try again.");
     }
   };
 
@@ -99,7 +118,7 @@ const LoginPage = () => {
 
               {/* Login Tab */}
               <TabsContent value="login">
-                <form onSubmit={handleLogin} className="space-y-6">
+                <form onSubmit={handleLogin} noValidate className="space-y-6">
                   <div className="space-y-2">
                     <Label htmlFor="email" className="text-slate-700 font-medium">
                       Email Address
@@ -164,7 +183,7 @@ const LoginPage = () => {
 
               {/* Register Tab */}
               <TabsContent value="register">
-                <form onSubmit={handleRegister} className="space-y-6">
+                <form onSubmit={handleRegister} noValidate className="space-y-6">
                   <div className="space-y-2">
                     <Label htmlFor="fullName" className="text-slate-700 font-medium">
                       Full Name
