@@ -1,9 +1,8 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import axios from 'axios';
 import { Toaster } from "./components/ui/sonner";
 import { toast } from "sonner";
-import './App.css';
 
 // Import Components
 import LoginPage from './components/LoginPage';
@@ -12,8 +11,11 @@ import CollaboratorDashboard from './components/CollaboratorDashboard';
 import TaskDetails from './components/TaskDetails';
 import LoadingSpinner from './components/LoadingSpinner';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+// ✅ Configuration API avec vérification
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8000';
 const API = `${BACKEND_URL}/api`;
+
+console.log('🔧 Backend Configuration:', { BACKEND_URL, API });
 
 // Auth Context
 const AuthContext = createContext();
@@ -25,6 +27,12 @@ const authReducer = (state, action) => {
     case 'LOGIN_SUCCESS':
       localStorage.setItem('token', action.payload.access_token);
       localStorage.setItem('user', JSON.stringify(action.payload.user));
+      localStorage.setItem('userId', action.payload.user.id);
+      localStorage.setItem('userRole', action.payload.user.role);
+      console.log('🔐 User stored:', { 
+        id: action.payload.user.id, 
+        role: action.payload.user.role 
+      });
       return {
         ...state,
         loading: false,
@@ -38,6 +46,8 @@ const authReducer = (state, action) => {
     case 'LOGOUT':
       localStorage.removeItem('token');
       localStorage.removeItem('user');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('userRole');
       return {
         ...state,
         isAuthenticated: false,
@@ -134,49 +144,72 @@ const useAuth = () => {
   return context;
 };
 
-// Configure axios interceptor for auth
+// ✅ Intercepteur axios
 axios.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
-    if (token && !config.headers['Content-Type']?.includes('multipart/form-data')) {
+    if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+      if (!config.headers['Content-Type'] && !config.headers['content-type']) {
+        config.headers['Content-Type'] = 'application/json';
+      }
     }
     return config;
   },
+  (error) => Promise.reject(error)
+);
+
+axios.interceptors.response.use(
+  (response) => response,
   (error) => {
+    if (error.response?.status === 401) {
+      console.log('🔐 401 Unauthorized - Token may be expired');
+    }
     return Promise.reject(error);
   }
 );
 
-// Protected Route Component
+// Protected Route
 const ProtectedRoute = ({ children, allowedRoles = [] }) => {
   const { isAuthenticated, user, loading } = useAuth();
   
-  if (loading) {
-    return <LoadingSpinner />;
-  }
-  
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
-  
+  if (loading) return <LoadingSpinner />;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
   if (allowedRoles.length > 0 && !allowedRoles.includes(user?.role)) {
     return <Navigate to="/unauthorized" replace />;
   }
-  
   return children;
 };
 
-// Main App Component
+// Theme Provider (force light)
+const ThemeProvider = ({ children }) => {
+  useEffect(() => {
+    const html = document.documentElement;
+    html.classList.remove('dark');
+    html.classList.add('light');
+    html.style.colorScheme = 'light';
+    document.body.style.backgroundColor = 'white';
+    document.body.style.color = 'black';
+    console.log('🎨 Theme forced to light mode');
+  }, []);
+
+  return children;
+};
+
 const AppContent = () => {
   const { isAuthenticated, user, loading } = useAuth();
 
-  if (loading) {
-    return <LoadingSpinner />;
-  }
+  useEffect(() => {
+    const html = document.documentElement;
+    html.classList.remove('dark');
+    html.classList.add('light');
+    html.style.colorScheme = 'light';
+  }, []);
+
+  if (loading) return <LoadingSpinner />;
 
   return (
-    <div className="App min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
+    <div className="App min-h-screen bg-gradient-to-br from-slate-50 to-blue-50" data-theme="light">
       <Routes>
         {!isAuthenticated ? (
           <>
@@ -187,55 +220,99 @@ const AppContent = () => {
           <>
             {user?.role === 'manager' ? (
               <>
-                <Route path="/dashboard" element={
-                  <ProtectedRoute allowedRoles={['manager']}>
-                    <ManagerDashboard />
-                  </ProtectedRoute>
-                } />
-                <Route path="/tasks/:taskId" element={
-                  <ProtectedRoute allowedRoles={['manager']}>
-                    <TaskDetails />
-                  </ProtectedRoute>
-                } />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute allowedRoles={['manager']}>
+                      <ManagerDashboard />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tasks/:taskId"
+                  element={
+                    <ProtectedRoute allowedRoles={['manager']}>
+                      <TaskDetails />
+                    </ProtectedRoute>
+                  }
+                />
               </>
             ) : (
               <>
-                <Route path="/dashboard" element={
-                  <ProtectedRoute allowedRoles={['collaborator']}>
-                    <CollaboratorDashboard />
-                  </ProtectedRoute>
-                } />
-                <Route path="/tasks/:taskId" element={
-                  <ProtectedRoute allowedRoles={['collaborator']}>
-                    <TaskDetails />
-                  </ProtectedRoute>
-                } />
+                <Route
+                  path="/dashboard"
+                  element={
+                    <ProtectedRoute allowedRoles={['collaborator']}>
+                      <CollaboratorDashboard />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/tasks/:taskId"
+                  element={
+                    <ProtectedRoute allowedRoles={['collaborator']}>
+                      <TaskDetails />
+                    </ProtectedRoute>
+                  }
+                />
               </>
             )}
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/unauthorized" element={
-              <div className="min-h-screen flex items-center justify-center bg-gray-50">
-                <div className="text-center">
-                  <h1 className="text-2xl font-bold text-gray-900 mb-4">Access Denied</h1>
-                  <p className="text-gray-600">You don't have permission to access this page.</p>
+            <Route
+              path="/unauthorized"
+              element={
+                <div className="min-h-screen flex items-center justify-center bg-gray-50">
+                  <div className="text-center">
+                    <h1 className="text-2xl font-bold text-gray-900 mb-4">Access Denied</h1>
+                    <p className="text-gray-600">You don't have permission to access this page.</p>
+                  </div>
                 </div>
-              </div>
-            } />
+              }
+            />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </>
         )}
       </Routes>
-      <Toaster position="top-right" />
+      <Toaster
+  position="top-right"
+  offset={80}          // <- décale le toast vers le bas
+  richColors
+  closeButton
+/>
+
     </div>
   );
 };
 
 function App() {
+  useEffect(() => {
+    const html = document.documentElement;
+    html.classList.remove('dark');
+    html.classList.add('light');
+    html.style.colorScheme = 'light';
+
+    const observer = new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+          if (html.classList.contains('dark')) {
+            html.classList.remove('dark');
+            html.classList.add('light');
+          }
+        }
+      });
+    });
+    
+    observer.observe(html, { attributes: true });
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <Router>
-      <AuthProvider>
-        <AppContent />
-      </AuthProvider>
+      <ThemeProvider>
+        <AuthProvider>
+          <AppContent />
+        </AuthProvider>
+      </ThemeProvider>
     </Router>
   );
 }
