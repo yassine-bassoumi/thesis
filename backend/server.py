@@ -1,5 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Form
+import aiofiles 
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -98,7 +100,8 @@ class Task(TaskBase):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
     attachments: List[str] = []
-    evidence_files: List[str] = []
+    completion_evidence: List[str] = []
+    completion_notes: Optional[str] = None
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
@@ -131,6 +134,23 @@ class Notification(NotificationBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     is_read: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+# Task Templates Models
+class TaskTemplateBase(BaseModel):
+    name: str
+    description: str
+    default_priority: str = TaskPriority.MEDIUM
+    estimated_duration_hours: int = 1
+    category: str = "general"
+
+class TaskTemplateCreate(TaskTemplateBase):
+    pass
+
+class TaskTemplate(TaskTemplateBase):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    creator_id: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    usage_count: int = 0
 
 # Utility functions
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -174,7 +194,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     if user is None:
         raise credentials_exception
     
-    # Nettoyer l'ObjectId
     if "_id" in user:
         del user["_id"]
     return User(**user)
@@ -191,13 +210,11 @@ def require_role(allowed_roles: List[str]):
 
 # Helper functions
 def clean_mongo_id(item: dict) -> dict:
-    """Nettoie les ObjectId de MongoDB"""
     if "_id" in item:
-        del item["_id"]  # Supprime l'ObjectId automatique de MongoDB
+        del item["_id"]
     return item
 
 def prepare_for_mongo(data: dict) -> dict:
-    """Prepare data for MongoDB storage"""
     if isinstance(data.get('created_at'), datetime):
         data['created_at'] = data['created_at'].isoformat()
     if isinstance(data.get('due_date'), datetime):
@@ -207,8 +224,6 @@ def prepare_for_mongo(data: dict) -> dict:
     return data
 
 def parse_from_mongo(item: dict) -> dict:
-    """Parse data from MongoDB"""
-    # Nettoyer l'ObjectId d'abord
     item = clean_mongo_id(item)
     
     if isinstance(item.get('created_at'), str):
@@ -284,12 +299,11 @@ async def get_users(current_user: User = Depends(require_role(["manager"]))):
     for user in users:
         user = clean_mongo_id(user)
         user = parse_from_mongo(user)
-        # Remove password from response
         user_dict = {k: v for k, v in user.items() if k != "password"}
         cleaned_users.append(user_dict)
     return cleaned_users
 
-# Task Routes - VERSIONS CORRIGÉES AVEC GESTION OBJECTID
+# Task Routes
 @app.post("/api/tasks", response_model=Task)
 async def create_task(task_data: TaskCreate, current_user: User = Depends(require_role(["manager"]))):
     assignee = await db.users.find_one({"id": task_data.assignee_id})
@@ -319,15 +333,12 @@ async def get_tasks(current_user: User = Depends(get_current_user)):
         else:
             tasks = await db.tasks.find({"assignee_id": current_user.id}).to_list(length=None)
         
-        # Traitement sécurisé des tâches avec gestion ObjectId
         processed_tasks = []
         for task in tasks:
             try:
-                # Nettoyer l'ObjectId AVANT tout traitement
                 task = clean_mongo_id(task)
                 task = parse_from_mongo(task)
                 
-                # Ajouter assignee_name seulement pour les managers
                 if current_user.role == "manager" and task.get("assignee_id"):
                     assignee = await db.users.find_one({"id": task["assignee_id"]})
                     if assignee:
@@ -345,6 +356,69 @@ async def get_tasks(current_user: User = Depends(get_current_user)):
         print(f"Error in get_tasks: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching tasks: {str(e)}")
 
+# 🔥 NOUVELLE ROUTE - Filtrage des tâches pour le manager
+@app.get("/api/tasks/filter")
+async def filter_tasks(
+    priority: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: User = Depends(require_role(["manager"]))
+):
+    """Filtrer les tâches par priorité, statut et date"""
+    try:
+        print(f"🎯 Filtrage tâches - Priority: {priority}, Status: {status}, Date: {date_from} to {date_to}")
+        
+        # Construire le filtre de base
+        filter_query = {"creator_id": current_user.id}
+        
+        # Ajouter les filtres optionnels
+        if priority and priority != "all":
+            filter_query["priority"] = priority
+        
+        if status and status != "all":
+            filter_query["status"] = status
+        
+        # Filtre par date (due_date)
+        if date_from or date_to:
+            date_filter = {}
+            if date_from:
+                date_filter["$gte"] = datetime.fromisoformat(date_from.replace('Z', '+00:00'))
+            if date_to:
+                date_filter["$lte"] = datetime.fromisoformat(date_to.replace('Z', '+00:00'))
+            filter_query["due_date"] = date_filter
+        
+        print(f"🔍 Query MongoDB: {filter_query}")
+        
+        # Exécuter la requête
+        tasks = await db.tasks.find(filter_query).to_list(length=None)
+        
+        # Traiter les résultats
+        processed_tasks = []
+        for task in tasks:
+            try:
+                task = clean_mongo_id(task)
+                task = parse_from_mongo(task)
+                
+                # Ajouter le nom de l'assigné
+                if task.get("assignee_id"):
+                    assignee = await db.users.find_one({"id": task["assignee_id"]})
+                    if assignee:
+                        assignee = clean_mongo_id(assignee)
+                        task["assignee_name"] = assignee.get("full_name", "Nom manquant")
+                
+                processed_tasks.append(task)
+            except Exception as e:
+                print(f"Error processing task {task.get('id', 'unknown')}: {e}")
+                continue
+        
+        print(f"✅ Tâches filtrées trouvées: {len(processed_tasks)}")
+        return processed_tasks
+        
+    except Exception as e:
+        print(f"❌ Error in filter_tasks: {e}")
+        raise HTTPException(status_code=500, detail=f"Error filtering tasks: {str(e)}")
+
 @app.get("/api/tasks/{task_id}")
 async def get_task(task_id: str, current_user: User = Depends(get_current_user)):
     try:
@@ -352,17 +426,14 @@ async def get_task(task_id: str, current_user: User = Depends(get_current_user))
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         
-        # Nettoyer l'ObjectId AVANT tout traitement
         task = clean_mongo_id(task)
         task = parse_from_mongo(task)
         
-        # Check permissions
         if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         elif current_user.role == "manager" and task["creator_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Ajouter le nom du collaborateur pour les managers
         if current_user.role == "manager" and task.get("assignee_id"):
             assignee = await db.users.find_one({"id": task["assignee_id"]})
             if assignee:
@@ -386,24 +457,20 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
         task = clean_mongo_id(task)
         task = parse_from_mongo(task)
         
-        # Check permissions
         if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         elif current_user.role == "manager" and task["creator_id"] != current_user.id:
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Update fields
         update_data = {k: v for k, v in task_update.dict().items() if v is not None}
         if update_data:
             update_data = prepare_for_mongo(update_data)
             await db.tasks.update_one({"id": task_id}, {"$set": update_data})
             
-            # Get updated task with assignee name
             updated_task = await db.tasks.find_one({"id": task_id})
             updated_task = clean_mongo_id(updated_task)
             updated_task = parse_from_mongo(updated_task)
             
-            # Add assignee name for managers
             if current_user.role == "manager" and updated_task.get("assignee_id"):
                 assignee = await db.users.find_one({"id": updated_task["assignee_id"]})
                 if assignee:
@@ -418,6 +485,202 @@ async def update_task(task_id: str, task_update: TaskUpdate, current_user: User 
     except Exception as e:
         print(f"Error in update_task: {e}")
         raise HTTPException(status_code=500, detail="Error updating task")
+
+# Routes pour compléter une tâche
+@app.post("/api/tasks/{task_id}/complete")
+async def complete_task(
+    task_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        print(f"🎯 Complete task - User: {current_user.id}")
+        
+        form_data = await request.form()
+        completion_data = form_data.get("completion_data", "")
+        
+        files = []
+        form_items = await request.form()
+        for key, value in form_items.items():
+            if hasattr(value, 'filename') and value.filename:
+                files.append(value)
+        
+        print(f"📦 completion_data: {completion_data}")
+        print(f"📁 fichiers: {len(files)}")
+        
+        task = await db.tasks.find_one({"id": task_id})
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        
+        if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        completion_notes = ""
+        if completion_data:
+            try:
+                data_dict = json.loads(completion_data)
+                completion_notes = data_dict.get('completion_notes', '')
+            except json.JSONDecodeError:
+                completion_notes = completion_data
+        
+        evidence_files = []
+        for file in files:
+            if file and hasattr(file, 'filename') and file.filename:
+                ext = os.path.splitext(file.filename)[1].lower()
+                if ext in ['.jpg', '.jpeg', '.png', '.pdf']:
+                    filename = f"{uuid.uuid4()}{ext}"
+                    file_path = ROOT_DIR / "uploads" / "evidence" / filename
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    content = await file.read()
+                    async with aiofiles.open(file_path, 'wb') as f:
+                        await f.write(content)
+                    
+                    evidence_files.append(filename)
+                    print(f"✅ Fichier sauvegardé: {filename}")
+        
+        update_data = {
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completion_evidence": evidence_files,
+            "completion_notes": completion_notes
+        }
+        
+        result = await db.tasks.update_one(
+            {"id": task_id},
+            {"$set": update_data}
+        )
+        
+        print(f"📊 Tâche mise à jour: {result.modified_count} modification(s)")
+        
+        if task["creator_id"] != current_user.id:
+            notification = Notification(
+                user_id=task["creator_id"],
+                title="Task Completed",
+                message=f"Task '{task['title']}' has been completed by {current_user.full_name}",
+                type="task_completed"
+            )
+            notification_dict = prepare_for_mongo(notification.dict())
+            await db.notifications.insert_one(notification_dict)
+        
+        return {
+            "status": "success", 
+            "message": "Task completed successfully",
+            "evidence_files": evidence_files,
+            "completion_notes": completion_notes
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/files/evidence/{filename}")
+async def download_evidence_file_simple(filename: str):
+    """Version simple sans auth ni permissions"""
+    try:
+        print(f"🎯 Téléchargement fichier: {filename}")
+        
+        file_path = ROOT_DIR / "uploads" / "evidence" / filename
+        
+        if not file_path.exists():
+            print(f"❌ Fichier non trouvé: {filename}")
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        print(f"✅ Envoi du fichier: {filename}")
+        
+        from fastapi.responses import FileResponse
+        return FileResponse(file_path)
+        
+    except Exception as e:
+        print(f"❌ Erreur: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error downloading file")
+
+# Task Templates Routes
+@app.post("/api/task-templates", response_model=TaskTemplate)
+async def create_task_template(
+    template_data: TaskTemplateCreate,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    template = TaskTemplate(**template_data.dict(), creator_id=current_user.id)
+    template_dict = prepare_for_mongo(template.dict())
+    await db.task_templates.insert_one(template_dict)
+    return template
+
+@app.get("/api/task-templates")
+async def get_task_templates(current_user: User = Depends(require_role(["manager"]))):
+    templates = await db.task_templates.find(
+        {"creator_id": current_user.id}
+    ).to_list(length=None)
+    
+    cleaned_templates = []
+    for template in templates:
+        template = clean_mongo_id(template)
+        template = parse_from_mongo(template)
+        cleaned_templates.append(template)
+    
+    return cleaned_templates
+
+@app.post("/api/task-templates/{template_id}/instantiate")
+async def instantiate_template(
+    template_id: str,
+    assignee_id: str,
+    due_date: datetime,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    template = await db.task_templates.find_one({"id": template_id})
+    if not template or template["creator_id"] != current_user.id:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    assignee = await db.users.find_one({"id": assignee_id})
+    if not assignee:
+        raise HTTPException(status_code=404, detail="Assignee not found")
+    
+    task_data = TaskCreate(
+        title=f"{template['name']}",
+        description=template['description'],
+        assignee_id=assignee_id,
+        due_date=due_date,
+        priority=template['default_priority']
+    )
+    
+    task = Task(**task_data.dict(), creator_id=current_user.id)
+    task_dict = prepare_for_mongo(task.dict())
+    await db.tasks.insert_one(task_dict)
+    
+    await db.task_templates.update_one(
+        {"id": template_id},
+        {"$inc": {"usage_count": 1}}
+    )
+    
+    notification = Notification(
+        user_id=assignee_id,
+        title="New Task from Template",
+        message=f"You have been assigned: {template['name']}",
+        type="task_assignment"
+    )
+    notification_dict = prepare_for_mongo(notification.dict())
+    await db.notifications.insert_one(notification_dict)
+    
+    return task
+
+@app.delete("/api/task-templates/{template_id}")
+async def delete_template(
+    template_id: str,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    result = await db.task_templates.delete_one({
+        "id": template_id,
+        "creator_id": current_user.id
+    })
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    return {"message": "Template deleted successfully"}
 
 # Performance Routes
 @app.post("/api/performance", response_model=Performance)
@@ -497,15 +760,15 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         total_tasks = await db.tasks.count_documents({"creator_id": current_user.id})
         completed_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.COMPLETED
+            "status": "completed"
         })
         pending_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.PENDING
+            "status": "pending"
         })
         overdue_tasks = await db.tasks.count_documents({
             "creator_id": current_user.id,
-            "status": TaskStatus.OVERDUE
+            "status": "overdue"
         })
         
         return {
@@ -518,11 +781,11 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         my_tasks = await db.tasks.count_documents({"assignee_id": current_user.id})
         completed = await db.tasks.count_documents({
             "assignee_id": current_user.id,
-            "status": TaskStatus.COMPLETED
+            "status": "completed"
         })
         pending = await db.tasks.count_documents({
             "assignee_id": current_user.id,
-            "status": TaskStatus.PENDING
+            "status": "pending"
         })
         
         evaluations = await db.performance_evaluations.find(

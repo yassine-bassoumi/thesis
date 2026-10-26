@@ -16,11 +16,13 @@ import {
   FileText,
   MessageCircle,
   Award,
-  Edit
+  Edit,
+  Download
 } from 'lucide-react';
 import axios from 'axios';
 import { toast } from "sonner";
 import PerformanceEvaluationModal from './PerformanceEvaluationModal';
+import TaskCompletion from './TaskCompletion';
 
 const TaskDetails = () => {
   const { taskId } = useParams();
@@ -35,19 +37,46 @@ const TaskDetails = () => {
     fetchTaskDetails();
   }, [taskId]);
 
-  const fetchTaskDetails = async () => {
-    try {
-      const response = await axios.get(`${API}/tasks/${taskId}`);
-      setTask(response.data);
-    } catch (error) {
-      console.error('Error fetching task details:', error);
-      toast.error('Failed to load task details');
-      navigate('/dashboard');
-    } finally {
-      setLoading(false);
+ const fetchTaskDetails = async () => {
+  try {
+    console.log('=== FETCHING TASK DETAILS ===');
+    console.log('Task ID:', taskId);
+    console.log('API URL:', `${API}/tasks/${taskId}`);
+    
+    const response = await axios.get(`${API}/tasks/${taskId}`);
+    
+    console.log('=== TASK DATA RECEIVED ===');
+    console.log('Full response:', response);
+    console.log('Task data:', response.data);
+    console.log('Completion evidence:', response.data.completion_evidence);
+    console.log('Evidence files:', response.data.evidence_files);
+    console.log('Attachments:', response.data.attachments);
+    
+    // Log all keys to see what's available
+    console.log('All keys in task data:', Object.keys(response.data));
+    
+    // Check if evidence exists in any form
+    if (response.data.completion_evidence) {
+      console.log('Completion evidence type:', typeof response.data.completion_evidence);
+      console.log('Completion evidence length:', response.data.completion_evidence.length);
     }
-  };
-
+    if (response.data.evidence_files) {
+      console.log('Evidence files type:', typeof response.data.evidence_files);
+      console.log('Evidence files length:', response.data.evidence_files.length);
+    }
+    
+    console.log('=== END DEBUG ===');
+    
+    setTask(response.data);
+  } catch (error) {
+    console.error('Error fetching task details:', error);
+    console.error('Error response:', error.response);
+    toast.error('Failed to load task details');
+    navigate('/dashboard');
+  } finally {
+    setLoading(false);
+  }
+};
   const handleStatusUpdate = async (newStatus) => {
     setUpdating(true);
     try {
@@ -101,6 +130,10 @@ const TaskDetails = () => {
   const handleEvaluationComplete = () => {
     setShowEvaluation(false);
     toast.success('Performance evaluation submitted successfully');
+  };
+
+  const downloadEvidence = (filename) => {
+    window.open(`${API}/files/evidence/${filename}`, '_blank');
   };
 
   if (loading) {
@@ -158,27 +191,6 @@ const TaskDetails = () => {
                   Evaluate Performance
                 </Button>
               )}
-              
-              {user?.role === 'collaborator' && task.status !== 'completed' && (
-                <Button
-                  onClick={() => handleStatusUpdate('completed')}
-                  disabled={updating}
-                  className="bg-green-500 hover:bg-green-600 text-white"
-                  data-testid="complete-task-button"
-                >
-                  {updating ? (
-                    <div className="flex items-center">
-                      <div className="loading-spinner mr-2"></div>
-                      Updating...
-                    </div>
-                  ) : (
-                    <>
-                      <CheckCircle className="h-4 w-4 mr-2" />
-                      Mark as Complete
-                    </>
-                  )}
-                </Button>
-              )}
             </div>
           </div>
         </div>
@@ -227,6 +239,46 @@ const TaskDetails = () => {
                     </div>
                   </div>
 
+                  {/* Completion Notes */}
+                  {task.completion_notes && (
+                    <div>
+                      <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
+                        <MessageCircle className="h-5 w-5 mr-2 text-green-600" />
+                        Completion Notes
+                      </h3>
+                      <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+                        <p className="text-slate-700 leading-relaxed">{task.completion_notes}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Evidence Files */}
+                 {task.completion_evidence && task.completion_evidence.length > 0 && (
+  <div>
+    <h3 className="text-lg font-semibold text-slate-900 mb-3 flex items-center">
+      <FileText className="h-5 w-5 mr-2 text-green-600" />
+      Evidence Files
+    </h3>
+    <div className="space-y-2">
+      {task.completion_evidence.map((evidence, index) => (
+        <div key={index} className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
+          <div className="flex items-center space-x-2">
+            <FileText className="h-4 w-4 text-green-600" />
+            <span className="text-slate-700">Evidence {index + 1}</span>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => downloadEvidence(evidence)}
+          >
+            <Download className="h-3 w-3" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
+                  {/* Old Attachments (for backward compatibility) */}
                   {task.attachments && task.attachments.length > 0 && (
                     <div>
                       <h3 className="text-lg font-semibold text-slate-900 mb-3">Attachments</h3>
@@ -240,6 +292,7 @@ const TaskDetails = () => {
                     </div>
                   )}
 
+                  {/* Old Evidence Files (for backward compatibility) */}
                   {task.evidence_files && task.evidence_files.length > 0 && (
                     <div>
                       <h3 className="text-lg font-semibold text-slate-900 mb-3">Evidence Files</h3>
@@ -350,6 +403,24 @@ const TaskDetails = () => {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Task Completion Section for Collaborators */}
+            {user?.role === 'collaborator' && task.status !== 'completed' && (
+              <Card className="glass-effect border-slate-200/50 animate-slideUp" style={{animationDelay: '0.6s'}}>
+                <CardHeader>
+                  <CardTitle className="text-lg font-semibold text-slate-900">Complete and Upload File</CardTitle>
+                  <CardDescription>
+                    Mark this task as complete and upload evidence files
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <TaskCompletion 
+                    task={task} 
+                    onTaskCompleted={fetchTaskDetails}
+                  />
+                </CardContent>
+              </Card>
+            )}
           </div>
         </div>
       </main>
