@@ -1,18 +1,28 @@
 import React from 'react';
 import { Button } from "@/components/ui/button";
-import { Download, FileText, FileSpreadsheet } from 'lucide-react';
+import { FileText, FileSpreadsheet } from 'lucide-react';
 
-const ExportManager = ({ tasks, users, stats, analyticsData }) => {
-  
+const ExportManager = ({ tasks = [], users = [], stats = {}, analyticsData = {} }) => {
+
+  // 🔐 Petite fonction pour échapper proprement les champs CSV
+  const escapeCsvValue = (value) => {
+    if (value === null || value === undefined) return '""';
+    const str = String(value).replace(/"/g, '""');
+    return `"${str}"`;
+  };
+
   const exportToCSV = (type = 'tasks') => {
     let csvData = [];
     let filename = '';
+
+    const safeTasks = Array.isArray(tasks) ? tasks : [];
+    const safeUsers = Array.isArray(users) ? users : [];
 
     switch (type) {
       case 'tasks':
         csvData = [
           ['Task ID', 'Title', 'Description', 'Assignee', 'Status', 'Priority', 'Created At', 'Due Date', 'Completed At'],
-          ...tasks.map(task => [
+          ...safeTasks.map(task => [
             task.id,
             task.title || '',
             task.description || '',
@@ -27,12 +37,12 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
         filename = 'tasks-export';
         break;
 
-      case 'performance':
-        const collaborators = users.filter(u => u.role === 'collaborator');
+      case 'performance': {
+        const collaborators = safeUsers.filter(u => u.role === 'collaborator');
         csvData = [
           ['Collaborator', 'Email', 'Total Tasks', 'Completed Tasks', 'Pending Tasks', 'Completion Rate'],
           ...collaborators.map(collaborator => {
-            const userTasks = tasks.filter(t => t.assignee_id === collaborator.id);
+            const userTasks = safeTasks.filter(t => t.assignee_id === collaborator.id);
             const completedTasks = userTasks.filter(t => t.status === 'completed').length;
             const pendingTasks = userTasks.filter(t => t.status !== 'completed').length;
             const totalTasks = userTasks.length;
@@ -50,9 +60,9 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
         ];
         filename = 'performance-export';
         break;
+      }
 
-      case 'analytics':
-        // Weekly completion data
+      case 'analytics': {
         const last7Days = Array.from({ length: 7 }, (_, i) => {
           const date = new Date();
           date.setDate(date.getDate() - (6 - i));
@@ -60,7 +70,7 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
         });
 
         const weeklyData = last7Days.map(date => {
-          const completedOnDate = tasks.filter(task => 
+          const completedOnDate = safeTasks.filter(task => 
             task.completed_at && task.completed_at.split('T')[0] === date
           ).length;
           return [date, completedOnDate];
@@ -75,16 +85,25 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
           ['Completed Tasks', stats.completed_tasks || 0],
           ['Pending Tasks', stats.pending_tasks || 0],
           ['Overdue Tasks', stats.overdue_tasks || 0],
-          ['Completion Rate', stats.total_tasks > 0 ? `${((stats.completed_tasks / stats.total_tasks) * 100).toFixed(1)}%` : '0%']
+          [
+            'Completion Rate',
+            stats.total_tasks > 0
+              ? `${((stats.completed_tasks / stats.total_tasks) * 100).toFixed(1)}%`
+              : '0%'
+          ]
         ];
         filename = 'analytics-export';
         break;
+      }
 
       default:
         return;
     }
 
-    const csvContent = csvData.map(row => row.join(',')).join('\n');
+    const csvContent = csvData
+      .map(row => row.map(escapeCsvValue).join(','))
+      .join('\n');
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -97,8 +116,10 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
   };
 
   const generateReport = () => {
-    // Generate a comprehensive text report
-    const collaborators = users.filter(u => u.role === 'collaborator');
+    const safeTasks = Array.isArray(tasks) ? tasks : [];
+    const safeUsers = Array.isArray(users) ? users : [];
+
+    const collaborators = safeUsers.filter(u => u.role === 'collaborator');
     const today = new Date().toLocaleDateString();
     
     let report = `COLLABORATOR TASK PLATFORM - MANAGEMENT REPORT\n`;
@@ -108,7 +129,7 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
 
     // Executive Summary
     report += `EXECUTIVE SUMMARY\n`;
-    report += `-`.repeat(20) + '\n';
+    report += `${'-'.repeat(20)}\n`;
     report += `Total Tasks: ${stats.total_tasks || 0}\n`;
     report += `Completed: ${stats.completed_tasks || 0} (${stats.total_tasks > 0 ? ((stats.completed_tasks / stats.total_tasks) * 100).toFixed(1) : 0}%)\n`;
     report += `Pending: ${stats.pending_tasks || 0}\n`;
@@ -117,9 +138,9 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
 
     // Team Performance
     report += `TEAM PERFORMANCE\n`;
-    report += `-`.repeat(20) + '\n';
+    report += `${'-'.repeat(20)}\n`;
     collaborators.forEach(collaborator => {
-      const userTasks = tasks.filter(t => t.assignee_id === collaborator.id);
+      const userTasks = safeTasks.filter(t => t.assignee_id === collaborator.id);
       const completedTasks = userTasks.filter(t => t.status === 'completed').length;
       const totalTasks = userTasks.length;
       const completionRate = totalTasks > 0 ? ((completedTasks / totalTasks) * 100).toFixed(1) : '0';
@@ -131,12 +152,12 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
     });
 
     // Task Breakdown by Priority
-    const highPriority = tasks.filter(t => t.priority === 'high').length;
-    const mediumPriority = tasks.filter(t => t.priority === 'medium').length;
-    const lowPriority = tasks.filter(t => t.priority === 'low').length;
+    const highPriority = safeTasks.filter(t => t.priority === 'high').length;
+    const mediumPriority = safeTasks.filter(t => t.priority === 'medium').length;
+    const lowPriority = safeTasks.filter(t => t.priority === 'low').length;
 
     report += `TASK PRIORITY BREAKDOWN\n`;
-    report += `-`.repeat(25) + '\n';
+    report += `${'-'.repeat(25)}\n`;
     report += `High Priority: ${highPriority}\n`;
     report += `Medium Priority: ${mediumPriority}\n`;
     report += `Low Priority: ${lowPriority}\n\n`;
@@ -149,9 +170,9 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
     });
 
     report += `RECENT ACTIVITY (LAST 7 DAYS)\n`;
-    report += `-`.repeat(30) + '\n';
+    report += `${'-'.repeat(30)}\n`;
     last7Days.forEach(date => {
-      const completedOnDate = tasks.filter(task => 
+      const completedOnDate = safeTasks.filter(task => 
         task.completed_at && task.completed_at.split('T')[0] === date
       ).length;
       const formattedDate = new Date(date).toLocaleDateString();
@@ -161,7 +182,6 @@ const ExportManager = ({ tasks, users, stats, analyticsData }) => {
     report += `\n${'='.repeat(50)}\n`;
     report += `End of Report - Collaborator Task Platform by YB\n`;
 
-    // Download as text file
     const blob = new Blob([report], { type: 'text/plain;charset=utf-8;' });
     const url = window.URL.createObjectURL(blob);
     const link = document.createElement('a');
