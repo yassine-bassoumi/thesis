@@ -145,63 +145,37 @@ const PerformanceEvaluationModal = ({
       const numericPunctuality = parseInt(formData.punctuality_score, 10);
       const numericQuality = parseInt(formData.quality_score, 10);
       const overallScore = (numericPunctuality + numericQuality) / 2;
+      const commentsValue = formData.comments.trim() || null;
 
+      // ✅ Route backend réelle : POST /api/performance (modèle PerformanceCreate)
       const response = await axios.post(
-        `${API}/tasks/${taskId}/evaluate`,
+        `${API}/performance`,
         {
           task_id: taskId,
           collaborator_id: collaboratorId,
           punctuality_score: numericPunctuality,
           quality_score: numericQuality,
-          performance_rating: overallScore,
-          overall_score: overallScore,
-          comments: formData.comments.trim() || null
+          comments: commentsValue
         },
         getAuthHeaders()
       );
-      
-      const serverData = response.data || {};
-      const nowIso = new Date().toISOString();
 
-      let updatedTask = null;
+      // ⚠️ La réponse est l'évaluation (performance_evaluations), pas la tâche.
+      // On garde donc l'id de la tâche et on applique les nouvelles notes.
+      const evaluation = response.data || {};
 
-      if (taskDetails) {
-        updatedTask = {
-          ...taskDetails,
-          ...serverData,
-          punctuality_score:
-            serverData.punctuality_score ??
-            taskDetails.punctuality_score ??
-            numericPunctuality,
-          quality_score:
-            serverData.quality_score ??
-            taskDetails.quality_score ??
-            numericQuality,
-          performance_rating:
-            serverData.performance_rating ??
-            serverData.overall_score ??
-            taskDetails.performance_rating ??
-            taskDetails.overall_score ??
-            overallScore,
-          feedback:
-            serverData.feedback ??
-            serverData.comments ??
-            taskDetails.feedback ??
-            (formData.comments.trim() || null),
-          evaluation_date:
-            serverData.evaluation_date ||
-            serverData.created_at ||
-            taskDetails.evaluation_date ||
-            nowIso,
-          status: serverData.status || taskDetails.status || 'completed',
-        };
-      } else if (serverData.id) {
-        updatedTask = serverData;
-      }
+      const updatedTask = {
+        ...(taskDetails || {}),
+        id: taskId,
+        status: 'completed',
+        punctuality_score: evaluation.punctuality_score ?? numericPunctuality,
+        quality_score: evaluation.quality_score ?? numericQuality,
+        performance_rating: overallScore,
+        feedback: evaluation.comments ?? commentsValue,
+        evaluation_date: evaluation.created_at || new Date().toISOString(),
+      };
 
-      if (updatedTask) {
-        setTaskDetails(updatedTask);
-      }
+      setTaskDetails(updatedTask);
 
       setFormData({
         punctuality_score: '',
@@ -222,7 +196,10 @@ const PerformanceEvaluationModal = ({
         return;
       }
 
-      const errorMessage = error.response?.data?.detail || 'Failed to submit evaluation';
+      const detail = error.response?.data?.detail;
+      const errorMessage = Array.isArray(detail)
+        ? detail.map((d) => d.msg).join(', ')
+        : detail || 'Failed to submit evaluation';
       toast.error(`Evaluation failed: ${errorMessage}`);
     } finally {
       setLoading(false);
