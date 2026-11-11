@@ -3771,28 +3771,8 @@ async def preview_evidence_file(
 
 
 # =============================================================================
-# DEBUG & HEALTH
+# HEALTH
 # =============================================================================
-
-
-@app.get("/api/debug/tasks/{task_id}")
-async def debug_task(task_id: str):
-    """Simple debug route to inspect a task in DB."""
-    try:
-        if db is None:
-            return {"error": "Database not connected"}
-
-        task = await db.tasks.find_one({"id": task_id})
-
-        if task:
-            task = clean_mongo_id(task)
-            task = parse_from_mongo(task)
-            return {"exists": True, "task": task}
-        else:
-            return {"exists": False, "task_id": task_id}
-
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @app.get("/api/health")
