@@ -65,7 +65,7 @@ const CollaboratorDashboard = () => {
   const [meetings, setMeetings] = useState([]);
   const [performance, setPerformance] = useState([]);
   const [notifications, setNotifications] = useState([]);
-  const [collaborators, setCollaborators] = useState([]);
+  const [collaborators] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showNotifications, setShowNotifications] = useState(false);
   const [error, setError] = useState('');
@@ -560,8 +560,7 @@ const CollaboratorDashboard = () => {
         axios.get(`${API}/tasks/user/${user.id}?t=${timestamp}`, { headers }),
         axios.get(`${API}/performance/${user.id}?t=${timestamp}`, { headers }),
         axios.get(`${API}/notifications?t=${timestamp}`, { headers }),
-        axios.get(`${API}/meetings/user/${user.id}?t=${timestamp}`, { headers }),
-        axios.get(`${API}/users?t=${timestamp}`, { headers })
+        axios.get(`${API}/meetings/user/${user.id}?t=${timestamp}`, { headers })
       ]);
 
       const [
@@ -569,8 +568,7 @@ const CollaboratorDashboard = () => {
         tasksRes, 
         performanceRes, 
         notificationsRes, 
-        meetingsRes, 
-        collaboratorsRes
+        meetingsRes
       ] = results;
 
       if (statsRes.status === 'fulfilled') {
@@ -606,10 +604,6 @@ const CollaboratorDashboard = () => {
 
       if (meetingsRes.status === 'fulfilled') {
         setMeetings(meetingsRes.value.data || []);
-      }
-
-      if (collaboratorsRes.status === 'fulfilled') {
-        setCollaborators(collaboratorsRes.value.data || []);
       }
 
       const errors = results.filter(result => result.status === 'rejected');
