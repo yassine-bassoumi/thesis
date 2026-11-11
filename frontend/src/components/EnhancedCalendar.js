@@ -636,9 +636,14 @@ const EnhancedCalendar = ({ events, userRole, onMeetingUpdate, collaborators = [
               sortedMeetings.map((event) => {
                 if (!event) return null;
 
+                const isOrganizer = event.organizer_id === currentUserIdForList;
+                const isParticipant =
+                  Array.isArray(event.participant_ids) &&
+                  event.participant_ids.includes(currentUserIdForList);
                 const hasResponded = event.participant_responses?.[currentUserIdForList];
                 const canRespond =
-                  userRole === 'collaborator' &&
+                  isParticipant &&
+                  !isOrganizer &&
                   (event.status === 'pending' || event.status === 'partially_accepted') &&
                   !hasResponded &&
                   !event._hideButtons;
@@ -804,7 +809,7 @@ const EnhancedCalendar = ({ events, userRole, onMeetingUpdate, collaborators = [
                         </>
                       )}
 
-                      {userRole === 'collaborator' && hasResponded && (
+                      {isParticipant && !isOrganizer && hasResponded && (
                         <div
                           className={`px-3 py-1 rounded text-xs font-medium ${
                             hasResponded === 'accept'
@@ -816,8 +821,8 @@ const EnhancedCalendar = ({ events, userRole, onMeetingUpdate, collaborators = [
                         </div>
                       )}
 
-                      {userRole === 'manager' && (
-                        <DropdownMenu>
+                     {userRole === 'manager' && isOrganizer && (
+  <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
