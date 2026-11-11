@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from bson import ObjectId
 import hashlib
 import secrets
+import bcrypt
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -26,7 +27,7 @@ load_dotenv(ROOT_DIR / ".env")
 # CONFIG
 # =============================================================================
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
+SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 6
 
@@ -50,8 +51,7 @@ security = HTTPBearer()
 # DATA MODELS - WITH PERSISTENT NOTIFICATIONS
 # =============================================================================
 
-
-class UserRole(str):
+class UserRole:
     MANAGER = "manager"
     COLLABORATOR = "collaborator"
 
@@ -59,7 +59,7 @@ class UserRole(str):
 class UserBase(BaseModel):
     email: EmailStr
     full_name: str
-    role: str
+    role: str = UserRole.COLLABORATOR
 
 
 class UserCreate(UserBase):
@@ -73,6 +73,17 @@ class User(UserBase):
 
 class UserLogin(BaseModel):
     email: EmailStr
+    password: str
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+class ManagerCreate(BaseModel):
+    email: EmailStr
+    full_name: str
     password: str
 
 
@@ -448,6 +459,63 @@ class NotificationService:
             print(f"❌ Error creating meeting notification: {str(e)}")
             return None
 
+    @staticmethod
+    async def create_user_notification(user_id: str, user_data: dict, notification_type: str):
+        """Create notifications for user management actions (managers / collaborators)."""
+        try:
+            name = user_data.get("full_name") or user_data.get("email") or "Unknown"
+            actor = user_data.get("actor_name") or "A manager"
+
+            notification_templates = {
+                "manager_created": {
+                    "title": "👤 New Manager Added",
+                    "message": f"Manager '{name}' has been added to the platform.",
+                },
+                "manager_welcome": {
+                    "title": "👋 Welcome to the Platform",
+                    "message": f"Your manager account has been created by {actor}.",
+                },
+                "collaborator_updated": {
+                    "title": "✏️ Collaborator Updated",
+                    "message": f"The profile of collaborator '{name}' has been updated.",
+                },
+                "profile_updated": {
+                    "title": "✏️ Profile Updated",
+                    "message": f"Your profile information has been updated by {actor}.",
+                },
+                "collaborator_deactivated": {
+                    "title": "🚫 Collaborator Deactivated",
+                    "message": f"Collaborator '{name}' has been deactivated. Their history is preserved.",
+                },
+            }
+
+            template = notification_templates.get(
+                notification_type,
+                {"title": "🔔 Notification", "message": "You have a new notification."},
+            )
+
+            current_time = datetime.now(timezone.utc)
+
+            await db.notifications.insert_one({
+                "user_id": user_id,
+                "type": notification_type,
+                "title": template["title"],
+                "message": template["message"],
+                "is_read": False,
+                "is_archived": False,
+                "metadata": {
+                    "target_user_id": user_data.get("id"),
+                    "target_user_name": name,
+                    "created_at": current_time.isoformat(),
+                },
+                "created_at": current_time,
+            })
+
+            print(f"✅ User notification created: {notification_type} for user {user_id}")
+
+        except Exception as e:
+            print(f"❌ Error creating user notification: {str(e)}")
+
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -487,21 +555,34 @@ def is_task_already_evaluated(task: dict) -> bool:
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify if a password matches the stored hash."""
+    """Verify both legacy SHA-256 and bcrypt password hashes."""
     try:
-        salt, stored_hash = hashed_password.split(":")
-        password_hash = hashlib.sha256((plain_password + salt).encode()).hexdigest()
-        return password_hash == stored_hash
-    except Exception:
+        # Legacy SHA-256 format: salt:hash
+        if ":" in hashed_password and not hashed_password.startswith("$2"):
+            salt, stored_hash = hashed_password.split(":", 1)
+            password_hash = hashlib.sha256(
+                (plain_password + salt).encode()
+            ).hexdigest()
+            return secrets.compare_digest(password_hash, stored_hash)
+
+        # Modern bcrypt format
+        return bcrypt.checkpw(
+            plain_password.encode("utf-8"),
+            hashed_password.encode("utf-8")
+        )
+    except (ValueError, TypeError):
         return False
 
 
 def get_password_hash(password: str) -> str:
-    """Hash password with salt using SHA-256 (for demo only)."""
-    salt = secrets.token_hex(16)
-    password_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-    return f"{salt}:{password_hash}"
+    """Hash passwords securely using bcrypt."""
+    password_bytes = password.encode("utf-8")
 
+    if len(password_bytes) > 72:
+        raise ValueError("Password exceeds bcrypt's 72-byte limit")
+
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password_bytes, salt).decode("utf-8")
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """Create JWT access token."""
@@ -514,50 +595,94 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
+    """Get current user from JWT and reject deactivated accounts."""
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Get current user from JWT."""
     credentials_exception = HTTPException(
         status_code=401,
         detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
+        headers={"WWW-Authenticate": "Bearer"}
     )
+
     try:
-        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
+        payload = jwt.decode(
+            credentials.credentials,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+
+        user_id = payload.get("sub")
+
         if user_id is None:
             raise credentials_exception
+
     except JWTError:
         raise credentials_exception
 
     user = await db.users.find_one({"id": user_id})
+
     if user is None:
         raise credentials_exception
+
+    if user.get("is_active") is False:
+        raise HTTPException(
+            status_code=403,
+            detail="This account has been deactivated."
+        )
 
     user = clean_mongo_id(user)
     user = parse_from_mongo(user)
 
-    return User(**user)
+    return User(**{
+        key: value
+        for key, value in user.items()
+        if key != "password"
+    })
 
 
 async def get_user_from_token_query(token: str) -> dict:
-    """
-    Décoder le token passé en query (?token=...) et retourner l'utilisateur.
-    Utilisé pour sécuriser le téléchargement d'évidence.
-    """
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: str = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
+    """Decode query JWT and reject deactivated users."""
 
-        user = await db.users.find_one({"id": user_id})
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+
+        user_id = payload.get("sub")
+
+        if not user_id:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token"
+            )
+
+        user = await db.users.find_one({
+            "id": user_id
+        })
+
         if not user:
-            raise HTTPException(status_code=401, detail="User not found")
+            raise HTTPException(
+                status_code=401,
+                detail="User not found"
+            )
+
+        if user.get("is_active") is False:
+            raise HTTPException(
+                status_code=403,
+                detail="This account has been deactivated."
+            )
 
         return user
+
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token"
+        )
 
 
 def require_role(allowed_roles: List[str]):
@@ -747,40 +872,106 @@ def normalize_meeting_date_to_str(raw_md) -> str:
 async def register(user_data: UserCreate):
     existing_user = await db.users.find_one({"email": user_data.email})
     if existing_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(
+            status_code=400,
+            detail="Email already registered"
+        )
 
     hashed_password = get_password_hash(user_data.password)
-    user = User(**user_data.dict())
+
+    # Public registration always creates a collaborator
+    safe_user_data = user_data.dict()
+    safe_user_data["role"] = UserRole.COLLABORATOR
+
+    user = User(**safe_user_data)
     user_dict = user.dict()
     user_dict["password"] = hashed_password
 
     user_dict = prepare_for_mongo(user_dict)
     await db.users.insert_one(user_dict)
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user.id}, expires_delta=access_token_expires)
+    access_token_expires = timedelta(
+        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    access_token = create_access_token(
+        data={"sub": user.id},
+        expires_delta=access_token_expires
+    )
 
-    return {"access_token": access_token, "token_type": "bearer", "user": user}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user
+    }
 
 
 @app.post("/api/auth/login", response_model=Token)
 async def login(user_credentials: UserLogin):
-    user_data = await db.users.find_one({"email": user_credentials.email})
-    if not user_data or not verify_password(user_credentials.password, user_data["password"]):
+
+    user_data = await db.users.find_one({
+        "email": user_credentials.email
+    })
+
+    if not user_data:
         raise HTTPException(
             status_code=401,
             detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    # Reject deactivated accounts
+    if user_data.get("is_active") is False:
+        raise HTTPException(
+            status_code=403,
+            detail="This account has been deactivated."
+        )
+
+    stored_password = user_data.get("password")
+
+    if not stored_password or not verify_password(
+        user_credentials.password,
+        stored_password
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    # Automatically migrate legacy SHA-256 hashes to bcrypt
+    if ":" in stored_password and not stored_password.startswith("$2"):
+        new_password_hash = get_password_hash(
+            user_credentials.password
+        )
+
+        await db.users.update_one(
+            {"id": user_data["id"]},
+            {"$set": {"password": new_password_hash}}
         )
 
     user_data = clean_mongo_id(user_data)
     user_data = parse_from_mongo(user_data)
-    user = User(**{k: v for k, v in user_data.items() if k != "password"})
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user.id}, expires_delta=access_token_expires)
+    user = User(**{
+        key: value
+        for key, value in user_data.items()
+        if key != "password"
+    })
 
-    return {"access_token": access_token, "token_type": "bearer", "user": user}
+    access_token_expires = timedelta(
+        minutes=ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+
+    access_token = create_access_token(
+        data={"sub": user.id},
+        expires_delta=access_token_expires
+    )
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user
+    }
 
 
 # =============================================================================
@@ -804,28 +995,284 @@ async def get_users(current_user: User = Depends(require_role(["manager"]))):
         cleaned_users.append(user_dict)
     return cleaned_users
 
-
 @app.get("/api/users/team")
-async def get_team_members(current_user: User = Depends(require_role(["manager"]))):
-    """Get all collaborators belonging to the team."""
+async def get_team_members(
+    current_user: User = Depends(require_role(["manager"]))
+):
+    """Get active managers and collaborators for the team directory."""
     try:
-        print(f"👥 Fetching team for manager: {current_user.id}")
+        print(f"Fetching team for manager: {current_user.id}")
 
-        collaborators = await db.users.find({"role": "collaborator"}).to_list(length=None)
+        team_members = await db.users.find({
+            "role": {"$in": ["manager", "collaborator"]},
+            "is_active": {"$ne": False}
+        }).to_list(length=None)
 
-        cleaned_collaborators = []
-        for user in collaborators:
+        cleaned_members = []
+
+        for user in team_members:
             user = clean_mongo_id(user)
             user = parse_from_mongo(user)
-            user_dict = {k: v for k, v in user.items() if k != "password"}
-            cleaned_collaborators.append(user_dict)
 
-        print(f"✅ Team members found: {len(cleaned_collaborators)}")
-        return cleaned_collaborators
+            user_dict = {
+                "id": user.get("id"),
+                "full_name": user.get("full_name", "Unknown User"),
+                "email": user.get("email", ""),
+                "role": user.get("role"),
+                "is_active": user.get("is_active", True)
+            }
+
+            cleaned_members.append(user_dict)
+
+        cleaned_members.sort(
+            key=lambda member: (
+                0 if member["role"] == "manager" else 1,
+                (member.get("full_name") or "").lower()
+            )
+        )
+
+        print(f"Team members found: {len(cleaned_members)}")
+
+        return cleaned_members
 
     except Exception as e:
-        print(f"❌ Error in get_team_members: {e}")
-        return []
+        print(f"Error in get_team_members: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error while retrieving team members"
+        )
+
+
+@app.post("/api/users/managers")
+async def create_manager(
+    manager_data: ManagerCreate,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    email = str(manager_data.email).strip().lower()
+    full_name = manager_data.full_name.strip()
+    password = manager_data.password
+
+    if not full_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Full name is required"
+        )
+
+    password_bytes = len(password.encode("utf-8"))
+
+    if len(password) < 10 or password_bytes > 72:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain at least 10 characters and no more than 72 bytes"
+        )
+
+    existing_user = await db.users.find_one({"email": email})
+
+    if existing_user:
+        if (
+            existing_user.get("role") == "manager"
+            and not existing_user.get("password")
+        ):
+            await db.users.update_one(
+                {"id": existing_user["id"]},
+                {
+                    "$set": {
+                        "password": get_password_hash(password),
+                        "full_name": full_name
+                    }
+                }
+            )
+
+            return {
+                "message": "Manager password repaired successfully",
+                "manager": {
+                    "id": existing_user["id"],
+                    "email": email,
+                    "full_name": full_name,
+                    "role": "manager"
+                }
+            }
+
+        raise HTTPException(
+            status_code=400,
+            detail="This email is already registered"
+        )
+
+    manager_id = str(uuid.uuid4())
+
+    manager_document = {
+        "id": manager_id,
+        "email": email,
+        "full_name": full_name,
+        "role": "manager",
+        "password": get_password_hash(password),
+        "created_at": datetime.now(timezone.utc)
+    }
+
+    await db.users.insert_one(
+        prepare_for_mongo(manager_document)
+    )
+
+    print(f"✅ New Manager created: {email}")
+
+    # Notify the manager who created the account
+    await NotificationService.create_user_notification(
+        user_id=current_user.id,
+        user_data={"id": manager_id, "full_name": full_name, "email": email},
+        notification_type="manager_created",
+    )
+
+    # Welcome notification for the new manager
+    await NotificationService.create_user_notification(
+        user_id=manager_id,
+        user_data={
+            "id": manager_id,
+            "full_name": full_name,
+            "email": email,
+            "actor_name": current_user.full_name,
+        },
+        notification_type="manager_welcome",
+    )
+
+    return {
+        "message": "Manager created successfully",
+        "manager": {
+            "id": manager_id,
+            "email": email,
+            "full_name": full_name,
+            "role": "manager"
+        }
+    }
+
+
+
+@app.put("/api/users/{user_id}")
+async def update_collaborator(
+    user_id: str,
+    user_data: UserUpdate,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    collaborator = await db.users.find_one({
+        "id": user_id,
+        "role": "collaborator",
+        "is_active": {"$ne": False}
+    })
+
+    if not collaborator:
+        raise HTTPException(
+            status_code=404,
+            detail="Collaborator not found"
+        )
+
+    update_data = user_data.dict(exclude_unset=True)
+
+    if not update_data:
+        raise HTTPException(
+            status_code=400,
+            detail="No information provided"
+        )
+
+    if "full_name" in update_data:
+        update_data["full_name"] = update_data["full_name"].strip()
+
+        if not update_data["full_name"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Full name cannot be empty"
+            )
+
+    if "email" in update_data:
+        new_email = str(update_data["email"]).strip().lower()
+
+        existing_email = await db.users.find_one({
+            "email": new_email,
+            "id": {"$ne": user_id}
+        })
+
+        if existing_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Email already registered"
+            )
+
+        update_data["email"] = new_email
+
+    update_data["updated_at"] = datetime.now(timezone.utc)
+
+    await db.users.update_one(
+        {"id": user_id, "role": "collaborator"},
+        {"$set": prepare_for_mongo(update_data)}
+    )
+
+    updated_user = await db.users.find_one({"id": user_id})
+
+    updated_user = clean_mongo_id(updated_user)
+    updated_user.pop("password", None)
+
+    updated_user = parse_from_mongo(updated_user)
+
+    # Notify the manager who made the change
+    await NotificationService.create_user_notification(
+        user_id=current_user.id,
+        user_data=updated_user,
+        notification_type="collaborator_updated",
+    )
+
+    # Notify the collaborator whose profile was changed
+    await NotificationService.create_user_notification(
+        user_id=user_id,
+        user_data={**updated_user, "actor_name": current_user.full_name},
+        notification_type="profile_updated",
+    )
+
+    return updated_user
+
+@app.delete("/api/users/{user_id}")
+async def delete_collaborator(
+    user_id: str,
+    current_user: User = Depends(require_role(["manager"]))
+):
+    collaborator = await db.users.find_one({
+        "id": user_id,
+        "role": "collaborator",
+        "is_active": {"$ne": False}
+    })
+
+    if not collaborator:
+        raise HTTPException(
+            status_code=404,
+            detail="Collaborator not found"
+        )
+
+    await db.users.update_one(
+        {
+            "id": user_id,
+            "role": "collaborator"
+        },
+        {
+            "$set": {
+                "is_active": False,
+                "deactivated_at": datetime.now(timezone.utc)
+            }
+        }
+    )
+
+    print(f"✅ Collaborator deactivated: {collaborator['email']}")
+
+    # Notify the manager (the deactivated collaborator can no longer log in)
+    await NotificationService.create_user_notification(
+        user_id=current_user.id,
+        user_data={
+            "id": user_id,
+            "full_name": collaborator.get("full_name"),
+            "email": collaborator.get("email"),
+        },
+        notification_type="collaborator_deactivated",
+    )
+
+    return {
+        "message": "Collaborator deactivated successfully"
+    }
 
 
 # =============================================================================
@@ -1417,64 +1864,111 @@ async def delete_task(task_id: str, current_user: User = Depends(get_current_use
             raise HTTPException(status_code=404, detail="Task not found")
 
         if current_user.role != "manager":
-            raise HTTPException(status_code=403, detail="Only managers can delete tasks")
+            raise HTTPException(
+                status_code=403,
+                detail="Only managers can delete tasks"
+            )
 
-        # ✅ NOTIFICATION pour la suppression - AVANT la suppression
+        # A manager can only delete tasks they created
+        if existing_task.get("creator_id") != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete your own tasks"
+            )
+
+        # Send notifications before deleting the task
         assignee_id = existing_task.get("assignee_id")
+
         if assignee_id:
             await NotificationService.create_task_notification(
                 user_id=assignee_id,
-                task_data={"id": task_id, "title": existing_task.get("title")},
+                task_data={
+                    "id": task_id,
+                    "title": existing_task.get("title")
+                },
                 notification_type="task_deleted",
             )
-            print(f"✅ Deletion notification sent to collaborator {assignee_id}")
-            # 🔔 Notif de confirmation pour le manager
+            print(f"Deletion notification sent to collaborator {assignee_id}")
+
+            # Confirmation notification for the manager
             await NotificationService.create_task_notification(
                 user_id=current_user.id,
-                task_data={"id": task_id, "title": existing_task.get("title")},
+                task_data={
+                    "id": task_id,
+                    "title": existing_task.get("title")
+                },
                 notification_type="task_deleted",
             )
-            print(f"✅ Deletion notification sent to manager {current_user.id}")
+            print(f"Deletion notification sent to manager {current_user.id}")
 
-        result = await db.tasks.delete_one({"id": task_id})
+        # Delete only the task owned by the current manager
+        result = await db.tasks.delete_one({
+            "id": task_id,
+            "creator_id": current_user.id
+        })
+
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        print(f"✅ Task {task_id} deleted successfully")
+        print(f"Task {task_id} deleted successfully")
+
         return {"message": "Task deleted successfully"}
 
     except HTTPException:
         raise
+
     except Exception as e:
-        print(f"❌ Error deleting task {task_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        print(f"Error deleting task {task_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
 
 
 @app.post("/api/tasks/{task_id}/complete")
 async def complete_task(
-    task_id: str, request: Request, current_user: User = Depends(get_current_user)
+    task_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
 ):
-    """Mark a task as completed by collaborator and attach evidence."""
+    """Mark an assigned task as completed by a collaborator and attach evidence."""
     try:
         print(f"🎯 Completing task {task_id} - User: {current_user.id}")
+
+        # Only collaborators can submit task completion
+        if current_user.role != "collaborator":
+            raise HTTPException(
+                status_code=403,
+                detail="Only collaborators can complete tasks"
+            )
 
         form_data = await request.form()
         completion_data = form_data.get("completion_data", "")
 
         files = []
-        form_items = await request.form()
-        for key, value in form_items.items():
+        for key, value in form_data.items():
             if hasattr(value, "filename") and value.filename:
                 files.append(value)
 
+        # Retrieve the task
         task = await db.tasks.find_one({"id": task_id})
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
 
-        if current_user.role == "collaborator" and task["assignee_id"] != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail="Task not found"
+            )
+
+        # A collaborator can only complete tasks assigned to them
+        if task.get("assignee_id") != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only complete tasks assigned to you"
+            )
 
         completion_notes = ""
+
         if completion_data:
             try:
                 data_dict = json.loads(completion_data)
@@ -1482,16 +1976,21 @@ async def complete_task(
             except json.JSONDecodeError:
                 completion_notes = completion_data
 
+        # Save completion evidence
         evidence_files = []
+
         for file in files:
             if file and hasattr(file, "filename") and file.filename:
                 ext = os.path.splitext(file.filename)[1].lower()
+
                 if ext in [".jpg", ".jpeg", ".png", ".pdf"]:
                     filename = f"{uuid.uuid4()}{ext}"
+
                     file_path = ROOT_DIR / "uploads" / "evidence" / filename
                     file_path.parent.mkdir(parents=True, exist_ok=True)
 
                     content = await file.read()
+
                     async with aiofiles.open(file_path, "wb") as f:
                         await f.write(content)
 
@@ -1499,7 +1998,7 @@ async def complete_task(
 
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # Reset evaluation on completion (new cycle)
+        # Reset evaluation fields for the new completion cycle
         update_data = {
             "status": "not_evaluated",
             "completed_at": now_iso,
@@ -1513,24 +2012,51 @@ async def complete_task(
             "evaluation_date": None,
         }
 
-        await db.tasks.update_one({"id": task_id}, {"$set": update_data})
+        # Update only if the task is still assigned to this collaborator
+        result = await db.tasks.update_one(
+            {
+                "id": task_id,
+                "assignee_id": current_user.id
+            },
+            {
+                "$set": update_data
+            }
+        )
 
-        if task.get("creator_id"):
-            print(f"📢 Sending completion notification to manager: {task['creator_id']}")
+        if result.matched_count == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Task not found or no longer assigned to you"
+            )
+
+        # Notify the manager who created the task
+        creator_id = task.get("creator_id")
+
+        if creator_id:
+            print(f"📢 Sending completion notification to manager: {creator_id}")
+
             await NotificationService.create_task_notification(
-                user_id=task["creator_id"],
-                task_data={"id": task_id, "title": task["title"]},
+                user_id=creator_id,
+                task_data={
+                    "id": task_id,
+                    "title": task.get("title", "Task")
+                },
                 notification_type="task_not_evaluated",
             )
-            print(f"✅ Completion notification sent to manager {task['creator_id']}")
 
-        if current_user.role == "collaborator":
-            await NotificationService.create_task_notification(
-                user_id=current_user.id,
-                task_data={"id": task_id, "title": task["title"]},
-                notification_type="task_completed",
-            )
-            print(f"✅ Completion notification sent to collaborator {current_user.id}")
+            print(f"✅ Completion notification sent to manager {creator_id}")
+
+        # Notify the collaborator
+        await NotificationService.create_task_notification(
+            user_id=current_user.id,
+            task_data={
+                "id": task_id,
+                "title": task.get("title", "Task")
+            },
+            notification_type="task_completed",
+        )
+
+        print(f"✅ Completion notification sent to collaborator {current_user.id}")
 
         return {
             "status": "success",
@@ -1541,140 +2067,13 @@ async def complete_task(
 
     except HTTPException:
         raise
+
     except Exception as e:
         print(f"❌ Error in complete_task: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/tasks/{task_id}/evaluate")
-async def evaluate_task(
-    task_id: str,
-    performance_data: PerformanceCreate,
-    current_user: User = Depends(require_role(["manager"])),
-):
-    """
-    Evaluate a task.
-
-    Allowed:
-      - First evaluation: task status = 'not_evaluated'
-      - Re-evaluation: task status = 'completed'
-
-    Each call:
-      - Adds a record in performance_evaluations (history)
-      - Overrides evaluation fields on the task (latest version)
-      - Sets task status to 'completed'
-      - Sends different notifications for first evaluation vs update
-    """
-    try:
-        print(f"📊 Evaluating task {task_id} by manager {current_user.id}")
-
-        task = await db.tasks.find_one({"id": task_id})
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        current_status = task.get("status")
-
-        if current_status not in ("not_evaluated", "completed"):
-            raise HTTPException(
-                status_code=400,
-                detail="Task is not ready for evaluation (status must be 'not_evaluated' or 'completed')",
-            )
-
-        if task.get("creator_id") != current_user.id:
-            raise HTTPException(status_code=403, detail="You can only evaluate your own tasks")
-
-        if task.get("assignee_id") != performance_data.collaborator_id:
-            raise HTTPException(status_code=400, detail="Collaborator ID doesn't match task assignee")
-
-        # Was this task already evaluated before this call?
-        previously_evaluated = is_task_already_evaluated(task)
-
-        # 1) Save evaluation in history collection
-        performance = Performance(**performance_data.dict(), evaluator_id=current_user.id)
-        avg_rating = (performance_data.punctuality_score + performance_data.quality_score) / 2.0
-
-        performance_dict = performance.dict()
-        performance_dict["overall_score"] = avg_rating
-        performance_dict = prepare_for_mongo(performance_dict)
-        await db.performance_evaluations.insert_one(performance_dict)
-
-        # 2) Update task with latest evaluation fields
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        task_update_fields = {
-            "status": "completed",   # always 'completed' after an evaluation
-            "punctuality_score": performance_data.punctuality_score,
-            "quality_score": performance_data.quality_score,
-            "performance_rating": avg_rating,
-            "feedback": performance_data.comments or None,
-            "evaluation_date": now_iso,
-            "updated_at": now_iso,
-        }
-
-        await db.tasks.update_one({"id": task_id}, {"$set": task_update_fields})
-
-        # 3) Reload updated task for response
-        updated_task = await db.tasks.find_one({"id": task_id})
-        updated_task = clean_mongo_id(updated_task)
-        updated_task = parse_from_mongo(updated_task)
-
-        if updated_task.get("status") == "not_evaluated":
-            updated_task["display_status"] = "AWAITING EVALUATION"
-        else:
-            updated_task["display_status"] = updated_task.get("status", "").upper()
-
-        # 4) Notifications (collaborator + manager)
-        notification_type = "evaluation_updated" if previously_evaluated else "evaluation_completed"
-
-        # To collaborator (assignee)
-        if performance_data.collaborator_id:
-            await NotificationService.create_task_notification(
-                user_id=performance_data.collaborator_id,
-                task_data={"id": task_id, "title": task.get("title", "Task")},
-                notification_type=notification_type,
-            )
-            print(
-                f"✅ Evaluation notification sent to collaborator {performance_data.collaborator_id} "
-                f"({notification_type})"
-            )
-
-        # To manager (current evaluator)
-        await NotificationService.create_task_notification(
-            user_id=current_user.id,
-            task_data={"id": task_id, "title": task.get("title", "Task")},
-            notification_type=notification_type,
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
         )
-        print(
-            f"✅ Evaluation notification sent to manager {current_user.id} "
-            f"({notification_type})"
-        )
-
-        print(
-            f"✅ Task {task_id} evaluated successfully "
-            f"({'re-evaluated' if previously_evaluated else 'first evaluation'})"
-        )
-
-        return {
-            "message": "Task evaluated successfully"
-            if not previously_evaluated
-            else "Task evaluation updated successfully",
-            "previously_evaluated": previously_evaluated,
-            "performance": performance,
-            "task_status": "completed",
-            "status": "completed",
-            "punctuality_score": performance_data.punctuality_score,
-            "quality_score": performance_data.quality_score,
-            "performance_rating": avg_rating,
-            "feedback": performance_data.comments or None,
-            "evaluation_date": now_iso,
-            "task": updated_task,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error evaluating task {task_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Error evaluating task: {str(e)}")
 
 
 # =============================================================================
@@ -2001,19 +2400,36 @@ async def respond_to_meeting(
         print(f"❌ Error responding to meeting {meeting_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error responding to meeting: {e}")
 
-
 @app.get("/api/meetings")
 async def get_meetings(current_user: User = Depends(get_current_user)):
-    """Get meetings for the current user (as organizer or participant)."""
+    """Get meetings for the current user as organizer or participant."""
     try:
-        print(f"📥 Getting meetings for user: {current_user.id}, role: {current_user.role}")
+        print(
+            f"📥 Getting meetings for user: {current_user.id}, "
+            f"role: {current_user.role}"
+        )
 
         if current_user.role == "manager":
-            cursor = db.meetings.find({"organizer_id": current_user.id})
-        else:
-            cursor = db.meetings.find({"participant_ids": {"$in": [current_user.id]}})
+            query = {
+                "$or": [
+                    {"organizer_id": current_user.id},
+                    {"participant_ids": {"$in": [current_user.id]}}
+                ]
+            }
 
-        meetings = await cursor.to_list(length=100)
+        elif current_user.role == "collaborator":
+            query = {
+                "participant_ids": {"$in": [current_user.id]}
+            }
+
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="Not enough permissions"
+            )
+
+        meetings = await db.meetings.find(query).to_list(length=100)
+
         print(f"📨 Raw meetings found: {len(meetings)}")
 
         cleaned_meetings: List[Dict[str, Any]] = []
@@ -2023,8 +2439,9 @@ async def get_meetings(current_user: User = Depends(get_current_user)):
                 meeting = clean_mongo_id(meeting)
                 meeting = parse_from_mongo(meeting)
 
-                # Sécuriser meeting_date en string "YYYY-MM-DD"
+                # Normalize meeting date
                 md_val = meeting.get("meeting_date")
+
                 if isinstance(md_val, datetime):
                     meeting["meeting_date"] = md_val.date().isoformat()
                 elif isinstance(md_val, date):
@@ -2032,20 +2449,26 @@ async def get_meetings(current_user: User = Depends(get_current_user)):
                 elif isinstance(md_val, str):
                     meeting["meeting_date"] = md_val[:10]
 
-                participant_names: List[str] = []
                 participant_ids = meeting.get("participant_ids", []) or []
 
                 if isinstance(participant_ids, str):
                     participant_ids = [participant_ids]
+
+                participant_names = []
 
                 for pid in participant_ids:
                     if not pid:
                         participant_names.append("Invalid ID")
                         continue
 
-                    user = await db.users.find_one({"id": pid})
-                    if user:
-                        name = user.get("full_name") or user.get("email") or "Unknown"
+                    participant = await db.users.find_one({"id": pid})
+
+                    if participant:
+                        name = (
+                            participant.get("full_name")
+                            or participant.get("email")
+                            or "Unknown"
+                        )
                         participant_names.append(name)
                     else:
                         participant_names.append("Former Member")
@@ -2053,9 +2476,24 @@ async def get_meetings(current_user: User = Depends(get_current_user)):
                 meeting["participant_names"] = participant_names
 
                 organizer_id = meeting.get("organizer_id")
-                organizer = await db.users.find_one({"id": organizer_id}) if organizer_id else None
+
+                organizer = (
+                    await db.users.find_one({"id": organizer_id})
+                    if organizer_id else None
+                )
+
                 meeting["organizer_name"] = (
-                    organizer.get("full_name") if organizer else "Unknown Organizer"
+                    organizer.get("full_name")
+                    if organizer else "Unknown Organizer"
+                )
+
+                # Identify the current user's relationship to the meeting
+                meeting["is_organizer"] = (
+                    organizer_id == current_user.id
+                )
+
+                meeting["is_participant"] = (
+                    current_user.id in participant_ids
                 )
 
                 cleaned_meetings.append(meeting)
@@ -2064,11 +2502,19 @@ async def get_meetings(current_user: User = Depends(get_current_user)):
                 print(f"❌ Error processing meeting: {e}")
                 continue
 
+        print(f"✅ Final meetings returned: {len(cleaned_meetings)}")
+
         return cleaned_meetings
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         print(f"❌ Error in get_meetings: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching meetings: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching meetings: {e}"
+        )
 
 
 @app.get("/api/meetings/{meeting_id}")
@@ -2426,122 +2872,293 @@ async def create_performance_evaluation(
     current_user: User = Depends(require_role(["manager"])),
 ):
     """
-    Create a performance evaluation (historical record) + update task evaluation fields.
-    Also sends notifications for first evaluation vs re-evaluation.
+    Create a performance evaluation (historical record) and update task fields.
+    A manager can only evaluate tasks they created.
     """
-    task = await db.tasks.find_one({"id": performance_data.task_id})
-    collaborator = await db.users.find_one({"id": performance_data.collaborator_id})
+    try:
+        task = await db.tasks.find_one({"id": performance_data.task_id})
 
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if not collaborator:
-        raise HTTPException(status_code=404, detail="Collaborator not found")
+        if not task:
+            raise HTTPException(
+                status_code=404,
+                detail="Task not found"
+            )
 
-    if task.get("assignee_id") != performance_data.collaborator_id:
-        raise HTTPException(status_code=400, detail="Collaborator ID doesn't match task assignee")
+        # A manager can only evaluate tasks they created
+        if task.get("creator_id") != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only evaluate your own tasks"
+            )
 
-    # Check if this task already had an evaluation
-    previously_evaluated = is_task_already_evaluated(task)
+        collaborator = await db.users.find_one({
+            "id": performance_data.collaborator_id,
+            "role": "collaborator"
+        })
 
-    # Create evaluation document (history)
-    performance = Performance(**performance_data.dict(), evaluator_id=current_user.id)
-    avg_rating = (performance_data.punctuality_score + performance_data.quality_score) / 2.0
+        if not collaborator:
+            raise HTTPException(
+                status_code=404,
+                detail="Collaborator not found"
+            )
 
-    performance_dict = performance.dict()
-    performance_dict["overall_score"] = avg_rating
-    performance_dict = prepare_for_mongo(performance_dict)
-    await db.performance_evaluations.insert_one(performance_dict)
+        # Verify that the collaborator is assigned to this task
+        if task.get("assignee_id") != performance_data.collaborator_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Collaborator ID doesn't match task assignee"
+            )
 
-    # Update task with latest evaluation fields
-    now_iso = datetime.now(timezone.utc).isoformat()
-    task_update_fields = {
-        "status": "completed",
-        "punctuality_score": performance_data.punctuality_score,
-        "quality_score": performance_data.quality_score,
-        "performance_rating": avg_rating,
-        "feedback": performance_data.comments or None,
-        "evaluation_date": now_iso,
-        "updated_at": now_iso,
-    }
-    await db.tasks.update_one({"id": performance_data.task_id}, {"$set": task_update_fields})
+        # Check whether this task has already been evaluated
+        previously_evaluated = is_task_already_evaluated(task)
 
-    notification_type = "evaluation_updated" if previously_evaluated else "evaluation_completed"
+        # Create evaluation history record
+        performance = Performance(
+            **performance_data.dict(),
+            evaluator_id=current_user.id
+        )
 
-    # Notify collaborator
-    await NotificationService.create_task_notification(
-        user_id=performance_data.collaborator_id,
-        task_data={"id": performance_data.task_id, "title": task.get("title", "Task")},
-        notification_type=notification_type,
-    )
+        avg_rating = (
+            performance_data.punctuality_score
+            + performance_data.quality_score
+        ) / 2.0
 
-    # Notify manager
-    await NotificationService.create_task_notification(
-        user_id=current_user.id,
-        task_data={"id": performance_data.task_id, "title": task.get("title", "Task")},
-        notification_type=notification_type,
-    )
+        performance_dict = performance.dict()
+        performance_dict["overall_score"] = avg_rating
+        performance_dict = prepare_for_mongo(performance_dict)
 
-    # Return performance model (Pydantic ignores extra field 'overall_score')
-    return performance
+        await db.performance_evaluations.insert_one(performance_dict)
 
+        # Update the task only if it still belongs to this manager
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        task_update_fields = {
+            "status": "completed",
+            "punctuality_score": performance_data.punctuality_score,
+            "quality_score": performance_data.quality_score,
+            "performance_rating": avg_rating,
+            "feedback": performance_data.comments or None,
+            "evaluation_date": now_iso,
+            "updated_at": now_iso,
+        }
+
+        result = await db.tasks.update_one(
+            {
+                "id": performance_data.task_id,
+                "creator_id": current_user.id,
+                "assignee_id": performance_data.collaborator_id
+            },
+            {
+                "$set": task_update_fields
+            }
+        )
+
+        if result.matched_count == 0:
+            # Avoid leaving an evaluation record if the task is no longer accessible
+            await db.performance_evaluations.delete_one({
+                "id": performance.id
+            })
+
+            raise HTTPException(
+                status_code=404,
+                detail="Task not found or access denied"
+            )
+
+        notification_type = (
+            "evaluation_updated"
+            if previously_evaluated
+            else "evaluation_completed"
+        )
+
+        # Notify the collaborator
+        await NotificationService.create_task_notification(
+            user_id=performance_data.collaborator_id,
+            task_data={
+                "id": performance_data.task_id,
+                "title": task.get("title", "Task")
+            },
+            notification_type=notification_type,
+        )
+
+        # Notify the manager
+        await NotificationService.create_task_notification(
+            user_id=current_user.id,
+            task_data={
+                "id": performance_data.task_id,
+                "title": task.get("title", "Task")
+            },
+            notification_type=notification_type,
+        )
+
+        return performance
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(f"Error creating performance evaluation: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating performance evaluation: {str(e)}"
+        )
 
 @app.get("/api/performance/{user_id}")
 async def get_performance_evaluations(
-    user_id: str, current_user: User = Depends(get_current_user)
+    user_id: str,
+    current_user: User = Depends(get_current_user)
 ):
-    if current_user.role == "collaborator" and current_user.id != user_id:
-        raise HTTPException(status_code=403, detail="Access denied")
+    """
+    Get performance evaluations.
 
-    evaluations = await db.performance_evaluations.find(
-        {"collaborator_id": user_id}
-    ).to_list(length=None)
+    Collaborator:
+        Can view all evaluations related to their own tasks.
 
-    cleaned_evaluations = []
+    Manager:
+        Can only view evaluations related to tasks they created.
+        Cannot view another manager's private data.
+    """
+    try:
+        if current_user.role == "collaborator":
 
-    for evaluation in evaluations:
-        evaluation = clean_mongo_id(evaluation)
-        evaluation = parse_from_mongo(evaluation)
+            # Collaborators can only access their own evaluations
+            if current_user.id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied"
+                )
 
-        # Attach task info (title, status)
-        task_id = evaluation.get("task_id")
-        if task_id:
-            task = await db.tasks.find_one({"id": task_id})
-            if task:
-                task = clean_mongo_id(task)
-                task = parse_from_mongo(task)
-                evaluation["task_title"] = task.get("title", "Untitled task")
-                raw_status = task.get("status")
-                evaluation["task_status"] = raw_status
-                evaluation["task_due_date"] = task.get("due_date")
+            evaluation_query = {
+                "collaborator_id": current_user.id
+            }
+
+        elif current_user.role == "manager":
+
+            # A manager cannot access another manager's evaluations
+            if current_user.id == user_id:
+                evaluation_query = {
+                    "evaluator_id": current_user.id
+                }
+
             else:
-                evaluation["task_title"] = "Unknown task"
+                target_user = await db.users.find_one({
+                    "id": user_id,
+                    "role": "collaborator"
+                })
+
+                if not target_user:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Collaborator not found"
+                    )
+
+                # Retrieve only tasks created by this manager
+                # and assigned to the requested collaborator
+                manager_tasks = await db.tasks.find(
+                    {
+                        "creator_id": current_user.id,
+                        "assignee_id": user_id
+                    },
+                    {
+                        "_id": 0,
+                        "id": 1
+                    }
+                ).to_list(length=None)
+
+                manager_task_ids = [
+                    task["id"]
+                    for task in manager_tasks
+                    if task.get("id")
+                ]
+
+                evaluation_query = {
+                    "collaborator_id": user_id,
+                    "task_id": {"$in": manager_task_ids}
+                }
+
         else:
-            evaluation["task_title"] = "Unknown task"
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied"
+            )
+
+        evaluations = await db.performance_evaluations.find(
+            evaluation_query
+        ).to_list(length=None)
+
+        cleaned_evaluations = []
+
+        for evaluation in evaluations:
+            evaluation = clean_mongo_id(evaluation)
+            evaluation = parse_from_mongo(evaluation)
+
+            # Attach task information
+            task_id = evaluation.get("task_id")
             raw_status = None
 
-        # Fix incoherences: if we have scores/comments,
-        # we consider the evaluation "completed" for display
-        p = evaluation.get("punctuality_score")
-        q = evaluation.get("quality_score")
-        overall = evaluation.get("overall_score")
+            if task_id:
+                task = await db.tasks.find_one({"id": task_id})
 
-        has_score = any(
-            isinstance(v, (int, float)) and v is not None and v > 0 for v in [p, q, overall]
+                if task:
+                    task = clean_mongo_id(task)
+                    task = parse_from_mongo(task)
+
+                    evaluation["task_title"] = task.get(
+                        "title",
+                        "Untitled task"
+                    )
+                    raw_status = task.get("status")
+                    evaluation["task_status"] = raw_status
+                    evaluation["task_due_date"] = task.get("due_date")
+
+                else:
+                    evaluation["task_title"] = "Unknown task"
+
+            else:
+                evaluation["task_title"] = "Unknown task"
+
+            # Preserve the existing frontend display logic
+            p = evaluation.get("punctuality_score")
+            q = evaluation.get("quality_score")
+            overall = evaluation.get("overall_score")
+
+            has_score = any(
+                isinstance(v, (int, float)) and v > 0
+                for v in [p, q, overall]
+                if v is not None
+            )
+
+            has_comments = (
+                isinstance(evaluation.get("comments"), str)
+                and evaluation["comments"].strip()
+            )
+
+            if raw_status == "not_evaluated" and (
+                has_score or has_comments
+            ):
+                evaluation["task_status"] = "completed"
+
+            # Calculate overall score if missing
+            if (
+                evaluation.get("overall_score") is None
+                and isinstance(p, (int, float))
+                and isinstance(q, (int, float))
+            ):
+                evaluation["overall_score"] = (p + q) / 2.0
+
+            cleaned_evaluations.append(evaluation)
+
+        return cleaned_evaluations
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(f"Error fetching performance evaluations: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching performance evaluations: {str(e)}"
         )
-        has_comments = isinstance(evaluation.get("comments"), str) and evaluation["comments"].strip()
 
-        if raw_status == "not_evaluated" and (has_score or has_comments):
-            evaluation["task_status"] = "completed"
-
-        # If no overall_score, calculate it for analytics on frontend
-        if evaluation.get("overall_score") is None and isinstance(p, (int, float)) and isinstance(
-            q, (int, float)
-        ):
-            evaluation["overall_score"] = (p + q) / 2.0
-
-        cleaned_evaluations.append(evaluation)
-
-    return cleaned_evaluations
 
 
 # =============================================================================
@@ -2599,40 +3216,107 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
             "avg_quality_score": round(avg_quality, 2),
         }
 
-
 @app.get("/api/dashboard/stats/{user_id}")
 async def get_dashboard_stats_user(
-    user_id: str, current_user: User = Depends(get_current_user)
+    user_id: str,
+    current_user: User = Depends(get_current_user)
 ):
-    """Dashboard stats for a specific user (used by React)."""
+    """Dashboard stats for the authenticated user."""
     try:
         print(f"📊 Fetching dashboard stats for user: {user_id}")
 
-        if current_user.role == "collaborator" and current_user.id != user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-
         if current_user.role == "manager":
-            tasks_cursor = db.tasks.find({"creator_id": user_id})
-            meetings_cursor = db.meetings.find({"organizer_id": user_id})
-        else:
-            tasks_cursor = db.tasks.find({"assignee_id": user_id})
-            meetings_cursor = db.meetings.find({"participant_ids": user_id})
 
-        tasks = await tasks_cursor.to_list(length=None)
-        meetings = await meetings_cursor.to_list(length=None)
+            if current_user.id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied"
+                )
+
+            tasks_query = {
+                "creator_id": current_user.id
+            }
+
+            meetings_query = {
+                "$or": [
+                    {"organizer_id": current_user.id},
+                    {"participant_ids": {"$in": [current_user.id]}}
+                ]
+            }
+
+            # Manager: average of the evaluations he has given
+            evaluations_query = {
+                "evaluator_id": current_user.id
+            }
+
+        elif current_user.role == "collaborator":
+
+            if current_user.id != user_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Access denied"
+                )
+
+            tasks_query = {
+                "assignee_id": current_user.id
+            }
+
+            meetings_query = {
+                "participant_ids": {"$in": [current_user.id]}
+            }
+
+            # Collaborator: average of the evaluations he has received
+            evaluations_query = {
+                "collaborator_id": current_user.id
+            }
+
+        else:
+            raise HTTPException(
+                status_code=403,
+                detail="Not enough permissions"
+            )
+
+        tasks = await db.tasks.find(
+            tasks_query
+        ).to_list(length=None)
+
+        meetings = await db.meetings.find(
+            meetings_query
+        ).to_list(length=None)
 
         total_tasks = len(tasks)
-        completed_tasks = len([t for t in tasks if t.get("status") == "completed"])
-        pending_tasks = len([t for t in tasks if t.get("status") == "pending"])
+
+        completed_tasks = sum(
+            1 for task in tasks
+            if task.get("status") == "completed"
+        )
+
+        pending_tasks = sum(
+            1 for task in tasks
+            if task.get("status") == "pending"
+        )
 
         total_meetings = len(meetings)
-        scheduled_meetings = len(
-            [m for m in meetings if m.get("status") in ["scheduled", "accepted"]]
-        )
-        pending_meetings = len([m for m in meetings if m.get("status") == "pending"])
-        declined_meetings = len([m for m in meetings if m.get("status") == "declined"])
 
-        evaluations_cursor = db.performance_evaluations.find({"collaborator_id": user_id})
+        scheduled_meetings = sum(
+            1 for meeting in meetings
+            if meeting.get("status") in ["scheduled", "accepted"]
+        )
+
+        pending_meetings = sum(
+            1 for meeting in meetings
+            if meeting.get("status") == "pending"
+        )
+
+        declined_meetings = sum(
+            1 for meeting in meetings
+            if meeting.get("status") == "declined"
+        )
+
+        evaluations_cursor = db.performance_evaluations.find(
+            evaluations_query
+        )
+
         evaluations = await evaluations_cursor.to_list(length=None)
 
         avg_punctuality = 0
@@ -2644,6 +3328,7 @@ async def get_dashboard_stats_user(
                 for e in evaluations
                 if e.get("punctuality_score") is not None
             ]
+
             quality_scores = [
                 e.get("quality_score", 0)
                 for e in evaluations
@@ -2651,9 +3336,14 @@ async def get_dashboard_stats_user(
             ]
 
             if punctuality_scores:
-                avg_punctuality = sum(punctuality_scores) / len(punctuality_scores)
+                avg_punctuality = (
+                    sum(punctuality_scores) / len(punctuality_scores)
+                )
+
             if quality_scores:
-                avg_quality = sum(quality_scores) / len(quality_scores)
+                avg_quality = (
+                    sum(quality_scores) / len(quality_scores)
+                )
 
         stats = {
             "total_tasks": total_tasks,
@@ -2669,22 +3359,19 @@ async def get_dashboard_stats_user(
         }
 
         print(f"✅ Dashboard stats calculated: {stats}")
+
         return stats
 
+    except HTTPException:
+        raise
+
     except Exception as e:
-        print(f"❌ Error in get_dashboard_stats: {e}")
-        return {
-            "total_tasks": 0,
-            "completed_tasks": 0,
-            "pending_tasks": 0,
-            "total_meetings": 0,
-            "scheduled_meetings": 0,
-            "pending_meetings": 0,
-            "declined_meetings": 0,
-            "avg_punctuality_score": 0,
-            "avg_quality_score": 0,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
-        }
+        print(f"❌ Error in get_dashboard_stats_user: {e}")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Error fetching dashboard statistics"
+        )
 
 
 @app.get("/api/calendar/events")
@@ -2772,42 +3459,63 @@ async def get_calendar_events(current_user: User = Depends(get_current_user)):
 async def get_user_tasks(user_id: str, current_user: User = Depends(get_current_user)):
     """Get tasks for a specific user (collaborator or by manager)."""
     try:
-        if current_user.role == "collaborator" and current_user.id != user_id:
+        # Collaborators can only access their own tasks
+        if current_user.role == "collaborator":
+            if current_user.id != user_id:
+                raise HTTPException(status_code=403, detail="Access denied")
+
+            query = {"assignee_id": current_user.id}
+
+        # Managers can only see their own tasks assigned to the requested user
+        elif current_user.role == "manager":
+            query = {
+                "assignee_id": user_id,
+                "creator_id": current_user.id
+            }
+
+        else:
             raise HTTPException(status_code=403, detail="Access denied")
 
-        if current_user.role == "manager":
-            collaborator_tasks = await db.tasks.find({"assignee_id": user_id}).to_list(
-                length=None
-            )
-        else:
-            collaborator_tasks = await db.tasks.find({"assignee_id": user_id}).to_list(
-                length=None
-            )
+        collaborator_tasks = await db.tasks.find(query).to_list(length=None)
 
         processed_tasks = []
+
         for task in collaborator_tasks:
             try:
                 task = clean_mongo_id(task)
                 task = parse_from_mongo(task)
 
                 if task.get("creator_id"):
-                    creator = await db.users.find_one({"id": task["creator_id"]})
+                    creator = await db.users.find_one({
+                        "id": task["creator_id"]
+                    })
+
                     if creator:
                         creator = clean_mongo_id(creator)
-                        task["creator_name"] = creator.get("full_name", "Manager")
+                        task["creator_name"] = creator.get(
+                            "full_name", "Manager"
+                        )
 
                 processed_tasks.append(task)
+
             except Exception as e:
-                print(f"Error processing task {task.get('id', 'unknown')}: {e}")
+                print(
+                    f"Error processing task {task.get('id', 'unknown')}: {e}"
+                )
                 continue
 
         return processed_tasks
 
     except HTTPException:
         raise
+
     except Exception as e:
         print(f"Error in get_user_tasks: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching user tasks: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching user tasks: {str(e)}"
+        )
+
 
 
 @app.get("/api/meetings/user/{user_id}")
@@ -2829,37 +3537,29 @@ async def get_user_meetings(user_id: str, current_user: User = Depends(get_curre
                 meeting = clean_mongo_id(meeting)
                 meeting = parse_from_mongo(meeting)
 
-                print(f"🎯 Meeting: {meeting['title']}")
-                print(f"   - Participant IDs: {meeting.get('participant_ids', [])}")
-                print(f"   - Organizer ID: {meeting.get('organizer_id')}")
 
                 participant_names = []
                 participant_ids = meeting.get("participant_ids", [])
 
                 for pid in participant_ids:
-                    print(f"   - Looking up user: {pid}")
                     user = await db.users.find_one({"id": pid})
                     if user:
                         name = user.get("full_name") or user.get("email") or "Unknown"
                         participant_names.append(name)
-                        print(f"   ✅ Found: {name}")
                     else:
-                        print(f"   ❌ User not found: {pid}")
+                        print(f"⚠️ Meeting '{meeting.get('title')}': participant {pid} not found")
 
                 meeting["participant_names"] = participant_names
-                print(f"   - Final participant_names: {participant_names}")
 
                 if meeting.get("organizer_id"):
                     organizer = await db.users.find_one({"id": meeting["organizer_id"]})
                     if organizer:
                         organizer = clean_mongo_id(organizer)
                         meeting["organizer_name"] = organizer.get("full_name", "Organizer")
-                        print(f"   - Organizer: {meeting['organizer_name']}")
                 else:
                     meeting["organizer_name"] = "Unknown Organizer"
 
                 cleaned_meetings.append(meeting)
-                print("   ✅ Meeting processed successfully")
 
             except Exception as e:
                 print(f"❌ Error processing meeting: {e}")
@@ -2907,75 +3607,126 @@ async def decline_meeting(meeting_id: str, current_user: User = Depends(get_curr
 # TEAM ANALYTICS ROUTE
 # =============================================================================
 
-
 @app.get("/api/analytics/team-performance")
-async def get_team_performance(current_user: User = Depends(require_role(["manager"]))):
-    """Team performance analytics for manager dashboard."""
+async def get_team_performance(
+    current_user: User = Depends(require_role(["manager"]))
+):
+    """Team performance analytics for active collaborators."""
+
     try:
         if current_user.role != "manager":
-            raise HTTPException(status_code=403, detail="Only managers can access team analytics")
+            raise HTTPException(
+                status_code=403,
+                detail="Only managers can access team analytics"
+            )
 
-        collaborators_cursor = db.users.find({"role": "collaborator"})
-        collaborators = await collaborators_cursor.to_list(length=None)
+        # Get active collaborators only
+        collaborators_cursor = db.users.find({
+            "role": "collaborator",
+            "is_active": {"$ne": False}
+        })
+
+        collaborators = await collaborators_cursor.to_list(
+            length=None
+        )
 
         team_performance = []
+
         for collaborator in collaborators:
             collaborator = clean_mongo_id(collaborator)
 
-            tasks_cursor = db.tasks.find({"assignee_id": collaborator["id"]})
+            # Get collaborator tasks
+            tasks_cursor = db.tasks.find({
+                "assignee_id": collaborator["id"]
+            })
+
             tasks = await tasks_cursor.to_list(length=None)
 
             total_tasks = len(tasks)
-            completed_tasks = len([t for t in tasks if t.get("status") == "completed"])
 
-            evaluations_cursor = db.performance_evaluations.find(
-                {"collaborator_id": collaborator["id"]}
+            completed_tasks = len([
+                task for task in tasks
+                if task.get("status") == "completed"
+            ])
+
+            # Get performance evaluations
+            evaluations_cursor = db.performance_evaluations.find({
+                "collaborator_id": collaborator["id"]
+            })
+
+            evaluations = await evaluations_cursor.to_list(
+                length=None
             )
-            evaluations = await evaluations_cursor.to_list(length=None)
 
             avg_punctuality = 0
             avg_quality = 0
 
             if evaluations:
                 punctuality_scores = [
-                    e.get("punctuality_score", 0)
-                    for e in evaluations
-                    if e.get("punctuality_score") is not None
+                    evaluation.get("punctuality_score", 0)
+                    for evaluation in evaluations
+                    if evaluation.get("punctuality_score") is not None
                 ]
+
                 quality_scores = [
-                    e.get("quality_score", 0)
-                    for e in evaluations
-                    if e.get("quality_score") is not None
+                    evaluation.get("quality_score", 0)
+                    for evaluation in evaluations
+                    if evaluation.get("quality_score") is not None
                 ]
 
                 if punctuality_scores:
-                    avg_punctuality = sum(punctuality_scores) / len(punctuality_scores)
-                if quality_scores:
-                    avg_quality = sum(quality_scores) / len(quality_scores)
+                    avg_punctuality = (
+                        sum(punctuality_scores) /
+                        len(punctuality_scores)
+                    )
 
-            team_performance.append(
-                {
-                    "collaborator_id": collaborator["id"],
-                    "collaborator_name": collaborator.get("full_name", "Unknown"),
-                    "collaborator_email": collaborator.get("email", "No email"),
-                    "total_tasks": total_tasks,
-                    "completed_tasks": completed_tasks,
-                    "completion_rate": round(
-                        (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1
-                    ),
-                    "avg_punctuality_score": round(avg_punctuality, 1),
-                    "avg_quality_score": round(avg_quality, 1),
-                    "last_evaluation_count": len(evaluations),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+                if quality_scores:
+                    avg_quality = (
+                        sum(quality_scores) /
+                        len(quality_scores)
+                    )
+
+            team_performance.append({
+                "collaborator_id": collaborator["id"],
+                "collaborator_name": collaborator.get(
+                    "full_name", "Unknown"
+                ),
+                "collaborator_email": collaborator.get(
+                    "email", "No email"
+                ),
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "completion_rate": round(
+                    (
+                        completed_tasks / total_tasks * 100
+                    ) if total_tasks > 0 else 0,
+                    1
+                ),
+                "avg_punctuality_score": round(
+                    avg_punctuality, 1
+                ),
+                "avg_quality_score": round(
+                    avg_quality, 1
+                ),
+                "last_evaluation_count": len(evaluations),
+                "last_updated": datetime.now(
+                    timezone.utc
+                ).isoformat()
+            })
 
         team_performance.sort(
-            key=lambda x: (x["avg_quality_score"] + x["avg_punctuality_score"]),
-            reverse=True,
+            key=lambda item: (
+                item["avg_quality_score"] +
+                item["avg_punctuality_score"]
+            ),
+            reverse=True
         )
 
-        print(f"✅ Team analytics calculated for {len(team_performance)} collaborators")
+        print(
+            f"✅ Team analytics calculated for "
+            f"{len(team_performance)} active collaborators"
+        )
+
         return team_performance
 
     except Exception as e:
@@ -3055,6 +3806,70 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+
+@app.on_event("startup")
+async def initialize_manager():
+    manager_email = os.getenv("MANAGER_EMAIL")
+    manager_name = os.getenv("MANAGER_FULL_NAME")
+    manager_password = os.getenv("MANAGER_PASSWORD")
+
+    if not manager_email or not manager_name or not manager_password:
+        print("⚠️ Manager environment variables are not configured.")
+        return
+
+    manager_email = manager_email.strip().lower()
+    manager_name = manager_name.strip()
+
+    password_bytes = len(manager_password.encode("utf-8"))
+
+    if len(manager_password) < 10 or password_bytes > 72:
+        raise RuntimeError(
+            "Manager password must contain at least 10 characters "
+            "and must not exceed 72 bytes."
+        )
+
+    existing_manager = await db.users.find_one({
+        "email": manager_email
+    })
+
+    if existing_manager:
+        if existing_manager.get("role") != "manager":
+            raise RuntimeError(
+                "The configured manager email belongs to a non-manager account."
+            )
+
+        if not existing_manager.get("password"):
+            await db.users.update_one(
+                {"id": existing_manager["id"]},
+                {
+                    "$set": {
+                        "password": get_password_hash(manager_password)
+                    }
+                }
+            )
+            print("✅ Initial manager password repaired.")
+        else:
+            print("✅ Initial manager already exists.")
+
+        return
+
+    manager_id = str(uuid.uuid4())
+
+    manager_document = {
+        "id": manager_id,
+        "email": manager_email,
+        "full_name": manager_name,
+        "role": "manager",
+        "password": get_password_hash(manager_password),
+        "created_at": datetime.now(timezone.utc)
+    }
+
+    await db.users.insert_one(
+        prepare_for_mongo(manager_document)
+    )
+
+    print("✅ Initial manager created successfully.")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
