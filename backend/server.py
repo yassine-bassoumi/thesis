@@ -2,11 +2,12 @@ from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Request, 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import aiofiles
 from fastapi.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
+from gridfs.errors import NoFile
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timedelta, timezone, date
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 import mimetypes
 from jose import JWTError, jwt
 import os
@@ -35,12 +36,26 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
+# Completion evidence files are stored in MongoDB GridFS
+# (collections evidence.files / evidence.chunks) so they survive
+# server restarts and redeployments.
+evidence_bucket = AsyncIOMotorGridFSBucket(db, bucket_name="evidence")
+
 app = FastAPI(title="Collaborator Task Platform")
+
+# Allowed frontend origins: local development + deployed frontend(s).
+# FRONTEND_ORIGINS is optional and comma-separated, e.g.
+# FRONTEND_ORIGINS=https://collaborator-platform.vercel.app
+extra_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("FRONTEND_ORIGINS", "").split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", *extra_origins],
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -1986,13 +2001,25 @@ async def complete_task(
                 if ext in [".jpg", ".jpeg", ".png", ".pdf"]:
                     filename = f"{uuid.uuid4()}{ext}"
 
-                    file_path = ROOT_DIR / "uploads" / "evidence" / filename
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-
                     content = await file.read()
 
-                    async with aiofiles.open(file_path, "wb") as f:
-                        await f.write(content)
+                    content_type = (
+                        mimetypes.guess_type(filename)[0]
+                        or "application/octet-stream"
+                    )
+
+                    # Store the file in MongoDB GridFS (persistent storage)
+                    await evidence_bucket.upload_from_stream(
+                        filename,
+                        content,
+                        metadata={
+                            "task_id": task_id,
+                            "uploaded_by": current_user.id,
+                            "original_name": file.filename,
+                            "content_type": content_type,
+                            "uploaded_at": datetime.now(timezone.utc),
+                        },
+                    )
 
                     evidence_files.append(filename)
 
@@ -3739,6 +3766,67 @@ async def get_team_performance(
 # =============================================================================
 
 
+async def get_evidence_file_response(
+    filename: str,
+    token: str,
+    disposition: str,
+):
+    """
+    Return a completion evidence file after checking access rights.
+
+    Access is granted to the collaborator assigned to the task and to the
+    manager who created it. Files are read from GridFS; files uploaded before
+    the GridFS migration are still read from the local uploads/evidence folder.
+    """
+    user = await get_user_from_token_query(token)
+
+    # Reject unsafe file names (path traversal, hidden files)
+    if not filename or Path(filename).name != filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid file name")
+
+    # Find the task that references this evidence file
+    task = await db.tasks.find_one({
+        "$or": [
+            {"completion_evidence": filename},
+            {"evidence_files": filename},
+        ]
+    })
+
+    if not task:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if user.get("id") not in (task.get("assignee_id"), task.get("creator_id")):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # 1) GridFS (current storage)
+    try:
+        grid_out = await evidence_bucket.open_download_stream_by_name(filename)
+    except NoFile:
+        grid_out = None
+
+    if grid_out is not None:
+        content = await grid_out.read()
+
+        metadata = grid_out.metadata or {}
+        media_type = (
+            metadata.get("content_type")
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream"
+        )
+
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'{disposition}; filename="{filename}"'
+            },
+        )
+
+    # 2) Legacy local storage (files uploaded before GridFS)
+    file_path = ROOT_DIR / "uploads" / "evidence" / filename
+    return build_file_response(file_path, filename, disposition=disposition)
+
+
 @app.get("/api/files/evidence/{filename}")
 async def download_evidence_file(
     filename: str,
@@ -3748,11 +3836,7 @@ async def download_evidence_file(
     Télécharger un fichier d'évidence (download direct).
     Utilisé par les boutons "Download".
     """
-    # 🔐 Vérifier que le token correspond à un user existant
-    await get_user_from_token_query(token)
-
-    file_path = ROOT_DIR / "uploads" / "evidence" / filename
-    return build_file_response(file_path, filename, disposition="attachment")
+    return await get_evidence_file_response(filename, token, "attachment")
 
 
 @app.get("/api/files/evidence/preview/{filename}")
@@ -3764,10 +3848,7 @@ async def preview_evidence_file(
     Prévisualiser un fichier d'évidence dans le navigateur (inline, nouvel onglet).
     Utilisé par le bouton "View" dans TaskDetails.
     """
-    await get_user_from_token_query(token)
-
-    file_path = ROOT_DIR / "uploads" / "evidence" / filename
-    return build_file_response(file_path, filename, disposition="inline")
+    return await get_evidence_file_response(filename, token, "inline")
 
 
 # =============================================================================
