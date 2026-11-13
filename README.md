@@ -3,12 +3,26 @@
 A web-based platform for coordinating team tasks, scheduling meetings, evaluating task performance, and monitoring team activity. The application provides separate **Manager** and **Collaborator** workspaces and centralises day-to-day team coordination in one place.
 
 > **Stack:** React · FastAPI · MongoDB Atlas  
+> **Hosting:** Vercel (frontend) · Render (backend) · MongoDB Atlas (database)  
 > **Development approach:** Scrum, organised into three sprints
+
+---
+
+## Live demo
+
+| Resource | URL |
+|---|---|
+| Web application | https://collaborator-task-platform.vercel.app |
+| API documentation (Swagger UI) | https://collaborator-task-api.onrender.com/docs |
+| API health check | https://collaborator-task-api.onrender.com/api/health |
+
+Demo account credentials are provided separately to the evaluation committee and are intentionally not published in this repository.
 
 ---
 
 ## Table of contents
 
+- [Live demo](#live-demo)
 - [Overview](#overview)
 - [Main features](#main-features)
 - [Roles and permissions](#roles-and-permissions)
@@ -18,6 +32,7 @@ A web-based platform for coordinating team tasks, scheduling meetings, evaluatin
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [Run the application locally](#run-the-application-locally)
+- [Deployment](#deployment)
 - [API documentation](#api-documentation)
 - [Task lifecycle](#task-lifecycle)
 - [Performance evaluation](#performance-evaluation)
@@ -64,7 +79,7 @@ The project was developed incrementally using the **Scrum** methodology and orga
 - List and Kanban views for organising work.
 - Filter tasks and follow their status.
 - Collaborators can start and complete their assigned tasks.
-- Task completion can include notes and evidence files.
+- Task completion can include notes and evidence files (JPG, PNG or PDF), stored in MongoDB GridFS.
 - Managers can create reusable task templates and instantiate them as tasks.
 
 ### Meeting management and calendar
@@ -140,11 +155,12 @@ A Collaborator can:
 |---|---|
 | Frontend | React, JavaScript, Tailwind CSS, shadcn/ui |
 | UI and interaction | React Router, Axios, Sonner, React Big Calendar, Moment.js, Lucide icons |
-| Backend | Python, FastAPI, Pydantic |
-| Database access | Motor (asynchronous MongoDB driver), PyMongo/BSON utilities |
+| Backend | Python 3.13, FastAPI, Pydantic |
+| Database access | Motor (asynchronous MongoDB driver), PyMongo/BSON utilities, GridFS |
 | Database | MongoDB Atlas |
 | Authentication | JWT; bcrypt password hashing, with compatibility migration for legacy salted SHA-256 hashes |
 | API documentation | FastAPI / Swagger UI |
+| Hosting | Vercel (frontend), Render (backend), UptimeRobot (availability monitoring) |
 
 ---
 
@@ -154,18 +170,18 @@ A Collaborator can:
 Browser
   │
   ▼
-React frontend (localhost:3000)
+React frontend — Vercel (localhost:3000 in development)
   │
-  │  HTTP requests with JWT Authorization header
+  │  HTTPS requests with JWT Authorization header
   ▼
-FastAPI backend (localhost:8000)
+FastAPI backend — Render (localhost:8000 in development)
   │
-  │  Motor asynchronous database operations
+  │  Motor asynchronous database operations + GridFS
   ▼
 MongoDB Atlas
 ```
 
-The backend is responsible for authentication, validation, role-based access control, task and meeting rules, evaluation recording, and notification creation. The frontend provides the user interface and calls the REST API.
+The backend is responsible for authentication, validation, role-based access control, task and meeting rules, evaluation recording, evidence storage, and notification creation. The frontend provides the user interface and calls the REST API.
 
 ### Main MongoDB collections
 
@@ -177,6 +193,8 @@ The backend is responsible for authentication, validation, role-based access con
 | `meetings` | Meeting details, organiser, participants, and participant responses |
 | `performance_evaluations` | Historical task performance evaluations |
 | `notifications` | Persistent user notifications |
+| `evidence.files` | GridFS metadata for completion evidence (file name, size, upload date, task, uploader, original name, content type) |
+| `evidence.chunks` | GridFS binary content of evidence files, split into 255 KB chunks |
 
 ---
 
@@ -186,14 +204,16 @@ The backend is responsible for authentication, validation, role-based access con
 thesis/
 ├── backend/
 │   ├── server.py
-│   ├── requirements.txt
-│   ├── .env                 # Local secrets; do not commit
-│   └── uploads/
-│       └── evidence/        # Locally stored task completion evidence
+│   ├── requirements.txt       # Runtime dependencies (used by Render)
+│   ├── requirements-dev.txt   # Runtime + development tools
+│   └── .env                   # Local secrets; never committed
 │
 ├── frontend/
 │   ├── package.json
 │   ├── package-lock.json
+│   ├── .npmrc                 # legacy-peer-deps=true
+│   ├── vercel.json            # SPA rewrites for Vercel
+│   ├── jsconfig.json
 │   ├── public/
 │   └── src/
 │       ├── App.js
@@ -229,7 +249,7 @@ The structure above highlights the principal application files. The repository a
 
 ## Prerequisites
 
-- **Python** — a version compatible with the packages in `backend/requirements.txt`.
+- **Python 3.13** (the version used for development and deployment).
 - **Node.js and npm**.
 - **MongoDB Atlas** cluster, or another MongoDB connection string accessible to the backend.
 - **Git** (optional, for cloning and version control).
@@ -243,32 +263,41 @@ The structure above highlights the principal application files. The repository a
 Create a file named `.env` inside the `backend/` directory. The backend loads this file from the directory containing `server.py`.
 
 ```env
-SECRET_KEY=replace-with-a-long-random-secret
-MONGO_URL=mongodb+srv://<username>:<password>@<cluster>/<database-options>
-DB_NAME=collaborator_task_platform
+SECRET_KEY=<long-random-secret>
+MONGO_URL=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+DB_NAME=<database-name>
+
+MANAGER_EMAIL=<initial-manager-email>
+MANAGER_FULL_NAME=<initial-manager-full-name>
+MANAGER_PASSWORD=<initial-manager-password>
+
+# Optional: additional allowed frontend origins, comma-separated
+FRONTEND_ORIGINS=
 ```
 
-| Variable | Description |
-|---|---|
-|SECRET_KEY=b4cc5662281797001348b1458e7105f6c26be6c0fc9b4663c3b095357689773f
-MONGO_URL="mongodb+srv://yassine:yassine1234@cluster0.dpd4z6a.mongodb.net/?retryWrites=true&w=majority"
-DB_NAME="collaborator_platform_demo"
+| Variable | Required | Description |
+|---|---|---|
+| `SECRET_KEY` | Yes | Key used to sign JWT access tokens. Generate one with `python -c "import secrets; print(secrets.token_hex(32))"`. |
+| `MONGO_URL` | Yes | MongoDB connection string. |
+| `DB_NAME` | Yes | Name of the MongoDB database used by the application. |
+| `MANAGER_EMAIL` | Yes | Email of the initial Manager account. |
+| `MANAGER_FULL_NAME` | Yes | Full name of the initial Manager account. |
+| `MANAGER_PASSWORD` | Yes | Password of the initial Manager account (10 characters minimum, 72 bytes maximum). Only used when the account does not exist yet. |
+| `FRONTEND_ORIGINS` | No | Extra CORS origins, comma-separated (for example the deployed frontend URL). `http://localhost:3000` and `http://127.0.0.1:3000` are always allowed. |
 
-MANAGER_EMAIL=manager@myaplication.com
-MANAGER_FULL_NAME=System Manager
-MANAGER_PASSWORD=UnMotDePassFort
-
-
+> Never commit the `.env` file or real credentials. The `.gitignore` file excludes it.
 
 ### 2. Frontend API address
 
-The frontend exports an API base address from `frontend/src/App.js`. Confirm that it points to the backend API used by your local environment. For the default local backend, it should target:
+The frontend reads the backend address from the `REACT_APP_BACKEND_URL` environment variable and appends `/api` automatically. Without this variable, it falls back to `http://localhost:8000`, which matches the local backend.
 
-```text
-http://127.0.0.1:8000/api
+To target another backend, create `frontend/.env.local`:
+
+```env
+REACT_APP_BACKEND_URL=https://<your-backend-host>
 ```
 
-The backend CORS configuration in the current development setup permits the local frontend origins `http://localhost:3000` and `http://127.0.0.1:3000`.
+Do not add `/api` or a trailing slash to this value.
 
 ---
 
@@ -285,13 +314,13 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python -m uvicorn server:app --reload
 ```
 
 The API is then available at `http://127.0.0.1:8000`.
 
-The backend startup routine checks or provisions the initial Manager account. The actual initial account credentials depend on the backend's account initialisation configuration; do not assume default credentials.
+On startup, the backend checks whether the account defined by `MANAGER_EMAIL` exists. It creates this Manager only if it is absent; existing accounts and data are never overwritten.
 
 ### 2. Start the frontend
 
@@ -313,17 +342,38 @@ Open `http://localhost:3000` in a browser and log in with an account provisioned
 
 ---
 
+## Deployment
+
+The application is deployed with free-tier managed services.
+
+| Component | Service | Configuration |
+|---|---|---|
+| Frontend | Vercel | Root directory `frontend`, Create React App preset, environment variable `REACT_APP_BACKEND_URL` |
+| Backend | Render (web service) | Root directory `backend`, build `pip install -r requirements.txt`, start `uvicorn server:app --host 0.0.0.0 --port $PORT`, health check `/api/health` |
+| Database | MongoDB Atlas | Dedicated database user restricted to `readWrite` on the demo database |
+| Monitoring | UptimeRobot | HTTP check of `/api/health` every 5 minutes |
+
+Backend environment variables on Render: `PYTHON_VERSION`, `SECRET_KEY`, `MONGO_URL`, `DB_NAME`, `MANAGER_EMAIL`, `MANAGER_FULL_NAME`, `MANAGER_PASSWORD`, and `FRONTEND_ORIGINS` (set to the Vercel URL).
+
+Deployment notes:
+
+- Render's file system is ephemeral. Completion evidence is therefore stored in **MongoDB GridFS**, so files persist across restarts and redeployments.
+- Render free instances sleep after a period of inactivity. The UptimeRobot health check keeps the backend responsive and reports any outage by email.
+- Both Vercel and Render redeploy automatically when a new commit is pushed to the tracked branch.
+
+---
+
 ## API documentation
 
-FastAPI exposes interactive API documentation while the backend is running:
+FastAPI exposes interactive API documentation:
 
-| Resource | URL |
-|---|---|
-| Swagger UI | http://127.0.0.1:8000/docs |
-| ReDoc | http://127.0.0.1:8000/redoc |
-| Health endpoint | http://127.0.0.1:8000/api/health |
+| Resource | Local | Online |
+|---|---|---|
+| Swagger UI | http://127.0.0.1:8000/docs | https://collaborator-task-api.onrender.com/docs |
+| ReDoc | http://127.0.0.1:8000/redoc | https://collaborator-task-api.onrender.com/redoc |
+| Health endpoint | http://127.0.0.1:8000/api/health | https://collaborator-task-api.onrender.com/api/health |
 
-Swagger UI can be used to inspect endpoints, submit requests, and review HTTP responses. Protected endpoints require a valid Bearer token.
+Swagger UI can be used to inspect endpoints, submit requests, and review HTTP responses. Protected endpoints require a valid Bearer token. All routes are served under the `/api` prefix; the root URL `/` intentionally returns `404 Not Found`.
 
 ---
 
@@ -348,7 +398,7 @@ Main task statuses: `pending`, `in_progress`, `not_evaluated`, `completed`, and 
 
 ## Performance evaluation
 
-Each evaluation records:
+Evaluations are submitted through `POST /api/performance`. Each evaluation records:
 
 | Field | Description |
 |---|---|
@@ -381,20 +431,23 @@ The platform supports invitations to both Collaborators and other Managers. An i
 - Backend dependencies enforce role-based access control.
 - Managers are restricted to their own private task and dashboard data.
 - Collaborators can access their own account information and assigned tasks.
+- Public registration always creates a Collaborator account; Manager accounts can only be created by an existing Manager.
 - Account deactivation preserves historical records.
 - New password hashes use bcrypt; legacy salted SHA-256 hashes are supported through a migration mechanism after successful authentication.
-- CORS is restricted to the configured local frontend origins in the development setup.
-- Evidence files are stored locally by the current backend implementation, under its `uploads/evidence` directory.
-
-> For any deployment beyond local development, review CORS origins, secret management, database permissions, file storage, logging, and account provisioning before exposing the application publicly.
+- CORS allows the local development origins plus the origins listed in `FRONTEND_ORIGINS`.
+- Completion evidence is stored in MongoDB GridFS. Only the task's assignee and creator can download or preview a file; unsafe file names are rejected.
+- Secrets are supplied through environment variables and are never stored in the repository.
+- The deployed backend connects to Atlas with a dedicated user limited to the demo database.
 
 ---
 
 ## Validation and testing
 
-The application has been validated primarily through **manual functional testing** in the local development environment, using both Manager and Collaborator accounts and the FastAPI Swagger UI for API checks.
+The application has been validated primarily through **manual functional testing**, using both Manager and Collaborator accounts and the FastAPI Swagger UI for API checks.
 
-The principal workflows covered include authentication, task creation and assignment, task completion with evidence, meeting scheduling and conflict checks, invitation responses, performance evaluation, notifications, dashboards, analytics, CSV export, and user-account administration.
+The principal workflows covered include authentication, task creation and assignment, task completion with evidence, meeting scheduling and conflict checks, invitation responses (including Manager-to-Manager invitations), performance evaluation and re-evaluation, notifications, dashboards, analytics, CSV export, and user-account administration.
+
+These workflows were tested both locally and on the deployed version. The deployed tests also confirmed that evidence files remain available after a backend redeployment.
 
 Formal load testing, a structured external usability study, and comprehensive automated test coverage have not been established as part of the reported validation. This README therefore does not claim production-scale performance or formal user-study results.
 
@@ -405,8 +458,8 @@ Formal load testing, a structured external usability study, and comprehensive au
 - The application is currently a web application; no dedicated mobile app is provided.
 - Notifications are internal to the platform; email, SMS, and push delivery are not implemented.
 - Meetings are not synchronised with external calendar services such as Google Calendar or Microsoft Outlook.
-- Evidence files use local server storage in the current implementation; a durable object-storage service would be preferable for production.
-- The application has been exercised in a development environment; a public production deployment and external pilot remain separate activities.
+- The deployment relies on free-tier services, which have limited resources and are not intended for production workloads.
+- The free MongoDB Atlas tier does not provide automatic backups.
 - Formal load testing and external usability evaluation remain future work.
 - Analytics are descriptive; predictive or forecasting analytics are not implemented.
 
@@ -416,10 +469,10 @@ Formal load testing, a structured external usability study, and comprehensive au
 
 Possible future improvements include:
 
-- Deploy the frontend and backend to managed hosting with secure environment configuration.
-- Introduce scalable object storage for completion evidence.
+- Move to paid hosting tiers with automatic backups and higher availability.
 - Add email, SMS, or push notification integrations.
 - Integrate external calendar services.
+- Add a self-service password change and reset feature.
 - Expand automated backend and frontend test coverage.
 - Conduct load, security, and usability testing with representative users.
 - Extend analytics with trend analysis and forecasting where justified by data.
