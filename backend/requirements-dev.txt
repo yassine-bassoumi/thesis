@@ -1,0 +1,16 @@
+# Development tools (local machine only, not needed on the server)
+# Install with:  pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Auto-reload for "uvicorn --reload"
+watchfiles==1.1.0
+
+# Code quality
+black==25.9.0
+flake8==7.3.0
+isort==6.0.1
+mypy==1.18.2
+
+# Tests
+pytest==8.4.2
