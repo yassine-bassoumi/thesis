@@ -1223,7 +1223,14 @@ const CollaboratorDashboard = () => {
                                 </div>
                               </div>
 
-                              {taskStatusLabel && (
+                              {evaluation.task_deleted ? (
+                                <Badge
+                                  variant="outline"
+                                  className="text-xs bg-slate-100 text-slate-600 border-slate-300"
+                                >
+                                  Task deleted
+                                </Badge>
+                              ) : taskStatusLabel && (
                                 <Badge 
                                   variant="outline"
                                   className="text-xs bg-green-50 text-green-700 border-green-200"

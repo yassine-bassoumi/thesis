@@ -2952,6 +2952,9 @@ async def create_performance_evaluation(
 
         performance_dict = performance.dict()
         performance_dict["overall_score"] = avg_rating
+        # Keep the task title with the evaluation so the history stays
+        # readable even if the task is deleted later
+        performance_dict["task_title"] = task.get("title")
         performance_dict = prepare_for_mongo(performance_dict)
 
         await db.performance_evaluations.insert_one(performance_dict)
@@ -3138,7 +3141,12 @@ async def get_performance_evaluations(
                     evaluation["task_due_date"] = task.get("due_date")
 
                 else:
-                    evaluation["task_title"] = "Unknown task"
+                    # The task was deleted after the evaluation:
+                    # keep the evaluation with its saved title
+                    evaluation["task_title"] = (
+                        evaluation.get("task_title") or "Deleted task"
+                    )
+                    evaluation["task_deleted"] = True
 
             else:
                 evaluation["task_title"] = "Unknown task"
