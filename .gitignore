@@ -92,3 +92,7 @@ frontend/node_modules/.cache/default-development/0.pack
 
 # Backend uploaded files
 backend/uploads/
+
+# Local maintenance scripts
+backend/backup_db.py
+backend/backfill_eval_titles.py
